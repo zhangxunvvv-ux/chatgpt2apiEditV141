@@ -1,0 +1,14 @@
+.git
+.gitignore
+.idea
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+web/.next
+web/node_modules
+
+assets
+README.md

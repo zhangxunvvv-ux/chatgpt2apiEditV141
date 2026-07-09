@@ -1,0 +1,24 @@
+{
+  "name": "chatgpt2api",
+  "version": "1.0.0",
+  "description": "<h1 align=\"center\">ChatGPT2API</h1>",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/basketikun/chatgpt2api.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/basketikun/chatgpt2api/issues"
+  },
+  "homepage": "https://github.com/basketikun/chatgpt2api#readme"
+}
