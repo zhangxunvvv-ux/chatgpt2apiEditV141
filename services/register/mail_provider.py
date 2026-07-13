@@ -7,12 +7,14 @@ import random
 import re
 import string
 import time
+from collections import deque
 from datetime import datetime, timezone
 from email import message_from_bytes, message_from_string, policy
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from threading import Lock
 from typing import Any, Callable, TypeVar
+from urllib.parse import urlsplit
 
 from curl_cffi import requests
 
@@ -210,6 +212,48 @@ domain_index = 0
 provider_index = 0
 cloudmail_token_lock = Lock()
 cloudmail_token_cache: dict[str, tuple[str, float]] = {}
+provider_log_sink: Callable[[str], None] | None = None
+_cloudflare_cooldown_lock = Lock()
+_cloudflare_cooldowns: dict[str, tuple[float, bool]] = {}
+
+
+def _provider_log(message: str) -> None:
+    if provider_log_sink is not None:
+        try:
+            provider_log_sink(message)
+            return
+        except Exception:
+            pass
+    print(message)
+
+
+def _activate_cloudflare_cooldown(key: str, seconds: float) -> bool:
+    now = time.monotonic()
+    with _cloudflare_cooldown_lock:
+        current = _cloudflare_cooldowns.get(key)
+        if current and current[0] > now:
+            return False
+        _cloudflare_cooldowns[key] = (now + max(1.0, seconds), False)
+        return True
+
+
+def _wait_for_cloudflare_cooldown(key: str) -> None:
+    while True:
+        should_log_resume = False
+        with _cloudflare_cooldown_lock:
+            current = _cloudflare_cooldowns.get(key)
+            if not current:
+                return
+            until, resume_logged = current
+            remaining = until - time.monotonic()
+            if remaining <= 0:
+                if not resume_logged:
+                    _cloudflare_cooldowns[key] = (until, True)
+                    should_log_resume = True
+                break
+        time.sleep(remaining)
+    if should_log_resume:
+        _provider_log("CloudflareTempMail 429 冷却结束，恢复邮箱请求")
 
 
 def _config(mail_config: dict) -> dict:
@@ -426,13 +470,29 @@ class CloudflareTempMailProvider(BaseMailProvider):
         self.api_base = str(entry["api_base"]).rstrip("/")
         self.admin_password = str(entry["admin_password"]).strip()
         self.domain = entry.get("domain") or []
+        try:
+            cooldown = float(entry.get("rate_limit_cooldown_seconds") or 600)
+        except (TypeError, ValueError):
+            cooldown = 600.0
+        self.rate_limit_cooldown_seconds = max(1.0, cooldown)
+        self._cooldown_key = f"{self.api_base}|{self.provider_ref or self.name}"
         self.session = _create_session(conf)
 
     def _request(self, method: str, path: str, headers: dict | None = None, params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200,)):
-        resp = self.session.request(method.upper(), f"{self.api_base}{path}", headers={"Content-Type": "application/json", "User-Agent": self.conf["user_agent"], **(headers or {})}, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
-        if resp.status_code not in expected:
-            raise RuntimeError(f"CloudflareTempMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
-        return {} if resp.status_code == 204 else resp.json()
+        while True:
+            _wait_for_cloudflare_cooldown(self._cooldown_key)
+            resp = self.session.request(method.upper(), f"{self.api_base}{path}", headers={"Content-Type": "application/json", "User-Agent": self.conf["user_agent"], **(headers or {})}, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
+            if resp.status_code == 429:
+                activated = _activate_cloudflare_cooldown(self._cooldown_key, self.rate_limit_cooldown_seconds)
+                if activated:
+                    _provider_log(
+                        f"CloudflareTempMail 触发 HTTP 429，所有线程暂停 {self.rate_limit_cooldown_seconds:.0f} 秒后自动恢复"
+                    )
+                _wait_for_cloudflare_cooldown(self._cooldown_key)
+                continue
+            if resp.status_code not in expected:
+                raise RuntimeError(f"CloudflareTempMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
+            return {} if resp.status_code == 204 else resp.json()
 
     def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
         data = self._request("POST", "/admin/new_address", headers={"x-admin-auth": self.admin_password}, payload={"enablePrefix": True, "name": username or _random_mailbox_name(), "domain": _next_domain(self.domain)})
@@ -440,7 +500,14 @@ class CloudflareTempMailProvider(BaseMailProvider):
         token = str(data.get("jwt") or "").strip()
         if not address or not token:
             raise RuntimeError("CloudflareTempMail 缺少 address 或 jwt")
-        return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "token": token}
+        return {
+            "provider": self.name,
+            "provider_ref": self.provider_ref,
+            "address": address,
+            "token": token,
+            "_rate_limit_cooldown_key": self._cooldown_key,
+            "_rate_limit_cooldown_seconds": self.rate_limit_cooldown_seconds,
+        }
 
     def get_existing_mailbox(self, email: str) -> dict[str, Any]:
         """通过管理员密码获取已有邮箱地址的 JWT，用于查询邮件。"""
@@ -758,59 +825,387 @@ class CloudMailGenProvider(BaseMailProvider):
         self.session.close()
 
 
+TEMPMAIL_LOL_API_BASE = "https://api.tempmail.lol/v2"
+_TEMPMAIL_KEY_SPLIT_RE = re.compile(r"[\s,，;；]+")
+_TEMPMAIL_DOMAIN_SPLIT_RE = re.compile(r"[\s,，;；]+")
+_TEMPMAIL_TRANSIENT_STATUSES = {500, 502, 503, 504, 520, 521, 522, 523, 524}
+
+
+def _parse_tempmail_keys(raw: Any) -> list[str]:
+    """Parse one or more TempMail.lol keys; an empty key means anonymous access."""
+    values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+    keys: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for piece in _TEMPMAIL_KEY_SPLIT_RE.split(str(value or "")):
+            key = piece.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+    return keys or [""]
+
+
+def _clean_tempmail_domain(raw: Any) -> str:
+    domain = str(raw or "").strip().lower()
+    if not domain:
+        return ""
+    if "://" in domain:
+        try:
+            parsed = urlsplit(domain)
+            domain = parsed.netloc or parsed.path or ""
+        except Exception:
+            return ""
+    domain = domain.strip().lstrip("@").strip()
+    wildcard = domain.startswith("*.")
+    if wildcard:
+        domain = domain[2:]
+    domain = domain.strip(".")
+    if not domain or "." not in domain or any(char in domain for char in (" ", ",", "/", ":", "*", "@")):
+        return ""
+    return f"*.{domain}" if wildcard else domain
+
+
+def _parse_tempmail_domains(raw: Any) -> list[str]:
+    values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+    domains: list[str] = []
+    for value in values:
+        for piece in _TEMPMAIL_DOMAIN_SPLIT_RE.split(str(value or "")):
+            domain = _clean_tempmail_domain(piece)
+            if domain and domain not in domains:
+                domains.append(domain)
+    return domains
+
+
+def _tempmail_has_domain_input(raw: Any) -> bool:
+    values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+    return any(str(value or "").strip() for value in values)
+
+
+def _tempmail_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _tempmail_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _random_tempmail_subdomain(length: int = 5) -> str:
+    first = random.choice(string.ascii_lowercase)
+    rest = "".join(random.choices(string.ascii_lowercase + string.digits, k=max(1, length - 1)))
+    return first + rest
+
+
+def _random_tempmail_prefix(length: int = 12) -> str:
+    return "".join(random.choices(string.ascii_lowercase + string.digits, k=max(1, length)))
+
+
+class _TempMailKeyPool:
+    """Thread-safe sliding-window limiter shared by short-lived provider instances."""
+
+    def __init__(self, keys: list[str], rate: int, window: float):
+        self.keys = list(keys)
+        self.rate = max(1, rate)
+        self.window = max(10.0, window)
+        self._lock = Lock()
+        self._usage = {key: deque() for key in self.keys}
+        self._cursor = 0
+
+    def _trim_locked(self, key: str, now: float) -> None:
+        usage = self._usage.setdefault(key, deque())
+        threshold = now - self.window
+        while usage and usage[0] <= threshold:
+            usage.popleft()
+
+    def acquire(self, max_wait: float) -> str:
+        deadline = time.monotonic() + max(0.0, max_wait)
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                earliest_wait = float("inf")
+                for offset in range(len(self.keys)):
+                    index = (self._cursor + offset) % len(self.keys)
+                    key = self.keys[index]
+                    self._trim_locked(key, now)
+                    usage = self._usage[key]
+                    if len(usage) < self.rate:
+                        # Reserve the request while holding the lock so concurrent workers
+                        # cannot all claim the final slot in the same rate window.
+                        usage.append(now)
+                        self._cursor = (index + 1) % len(self.keys)
+                        return key
+                    earliest_wait = min(earliest_wait, usage[0] + self.window - now)
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f"TempMail.lol 所有 API Key 均已达到限速，等待超过 {max_wait:.0f} 秒")
+            time.sleep(min(max(0.5, earliest_wait), remaining, 5.0))
+
+    def mark_rate_limited(self, key: str) -> None:
+        with self._lock:
+            now = time.monotonic()
+            usage = self._usage.setdefault(key, deque())
+            usage.clear()
+            usage.extend(now for _ in range(self.rate))
+
+
+_tempmail_pool_lock = Lock()
+_tempmail_pools: dict[str, tuple[tuple[tuple[str, ...], int, float], _TempMailKeyPool]] = {}
+_tempmail_token_key_lock = Lock()
+_tempmail_token_keys: dict[str, str] = {}
+
+
+def _get_tempmail_pool(provider_ref: str, keys: list[str], rate: int, window: float) -> _TempMailKeyPool:
+    pool_key = provider_ref or "tempmail_lol#default"
+    signature = (tuple(keys), rate, window)
+    with _tempmail_pool_lock:
+        current = _tempmail_pools.get(pool_key)
+        if current is None or current[0] != signature:
+            pool = _TempMailKeyPool(keys, rate, window)
+            _tempmail_pools[pool_key] = (signature, pool)
+            return pool
+        return current[1]
+
+
+def _remember_tempmail_token_key(token: str, key: str) -> None:
+    if not token:
+        return
+    with _tempmail_token_key_lock:
+        _tempmail_token_keys.pop(token, None)
+        _tempmail_token_keys[token] = key
+        if len(_tempmail_token_keys) > 1024:
+            for old_token in list(_tempmail_token_keys)[:512]:
+                _tempmail_token_keys.pop(old_token, None)
+
+
+def _lookup_tempmail_token_key(token: str) -> str | None:
+    with _tempmail_token_key_lock:
+        return _tempmail_token_keys.get(token)
+
+
+class _TempMailLolRequestError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _classify_tempmail_error(error: _TempMailLolRequestError) -> str:
+    status = error.status_code
+    if status == 429:
+        return "rate_limit"
+    if status in _TEMPMAIL_TRANSIENT_STATUSES or (status is not None and 500 <= status < 600):
+        return "transient"
+    if status is not None and 400 <= status < 500:
+        return "fatal"
+    return "transient"
+
+
 class TempMailLolProvider(BaseMailProvider):
     name = "tempmail_lol"
 
     def __init__(self, entry: dict, conf: dict):
         super().__init__(conf, str(entry.get("provider_ref") or ""))
-        self.api_key = str(entry.get("api_key") or "").strip()
-        self.domain = [str(item).strip() for item in (entry.get("domain") or []) if str(item).strip()]
+        raw_keys = entry.get("api_key") or entry.get("tempmail_api_key") or ""
+        raw_domains = entry.get("domain") if entry.get("domain") is not None else entry.get("tempmail_domain")
+        self.api_keys = _parse_tempmail_keys(raw_keys)
+        self.domains = _parse_tempmail_domains(raw_domains)
+        self.invalid_domain_config = _tempmail_has_domain_input(raw_domains) and not self.domains
+        self.rate_per_window = max(1, _tempmail_int(entry.get("rate_per_window", entry.get("tempmail_rate_per_window", 24)), 24))
+        self.window_seconds = max(10.0, _tempmail_float(entry.get("window_seconds", entry.get("tempmail_window_seconds", 300)), 300))
+        self.max_wait = max(0.0, _tempmail_float(entry.get("max_wait", entry.get("tempmail_max_wait", 600)), 600))
+        self.create_total_budget = max(15.0, _tempmail_float(entry.get("create_total_budget", entry.get("tempmail_create_total_budget", 90)), 90))
+        self.key_pool = _get_tempmail_pool(self.provider_ref, self.api_keys, self.rate_per_window, self.window_seconds)
         self.session = _create_session(conf)
         self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/json", "Content-Type": "application/json"})
-        if self.api_key:
-            self.session.headers["Authorization"] = f"Bearer {self.api_key}"
 
     @staticmethod
     def _resolve_domain(domain: str) -> tuple[str, bool]:
         text = str(domain or "").strip().lower()
         if text.startswith("*.") and len(text) > 2:
-            return f"{_random_subdomain_label()}.{text[2:]}", True
+            return f"{_random_tempmail_subdomain()}.{text[2:]}", True
         return text, False
 
-    def _request(self, method: str, path: str, params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200,)):
-        resp = self.session.request(method.upper(), f"https://api.tempmail.lol/v2{path}", params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
+    def _request(self, method: str, path: str, *, api_key: str | None = None, params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200,)) -> dict[str, Any]:
+        selected_key = self.api_keys[0] if api_key is None else api_key
+        headers = {"Authorization": f"Bearer {selected_key}"} if selected_key else {}
+        try:
+            resp = self.session.request(
+                method.upper(),
+                f"{TEMPMAIL_LOL_API_BASE}{path}",
+                headers=headers,
+                params=params,
+                json=payload,
+                timeout=self.conf["request_timeout"],
+                verify=False,
+            )
+        except Exception as error:
+            raise _TempMailLolRequestError(f"TempMail.lol 请求失败: {method} {path}, {error}") from error
         if resp.status_code not in expected:
-            raise RuntimeError(f"TempMail.lol 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
-        data = resp.json()
+            raise _TempMailLolRequestError(
+                f"TempMail.lol 请求失败: {method} {path}, HTTP {resp.status_code}, body={str(resp.text or '')[:300]}",
+                status_code=resp.status_code,
+            )
+        try:
+            data = resp.json()
+        except Exception as error:
+            raise _TempMailLolRequestError(
+                f"TempMail.lol {method} {path} 响应解析失败: {error}",
+                status_code=resp.status_code,
+            ) from error
         if not isinstance(data, dict):
-            raise RuntimeError(f"TempMail.lol {method} {path} 返回结构不是对象")
+            raise _TempMailLolRequestError(
+                f"TempMail.lol {method} {path} 返回结构不是对象",
+                status_code=resp.status_code,
+            )
         return data
 
     def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
-        payload: dict[str, Any] = {}
-        if self.domain:
-            domain, force_random_prefix = self._resolve_domain(random.choice(self.domain))
-            payload["domain"] = domain
-            if force_random_prefix:
-                payload["prefix"] = _random_mailbox_name()
-        if username and "prefix" not in payload:
-            payload["prefix"] = username
-        data = self._request("POST", "/inbox/create", payload=payload, expected=(200, 201))
-        address = str(data.get("address") or "").strip()
-        token = str(data.get("token") or "").strip()
-        if not address or not token:
-            raise RuntimeError("TempMail.lol 缺少 address 或 token")
-        return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "token": token}
+        if self.invalid_domain_config:
+            raise RuntimeError("TempMail.lol 自定义域名无效；请填写完整域名，支持多域名及 *.example.com 通配子域")
+
+        max_attempts = max(4, len(self.api_keys) * 2 + 2)
+        deadline = time.monotonic() + self.create_total_budget
+        backoff = 1.0
+        last_error: Exception | None = None
+        last_status: int | None = None
+
+        for _attempt in range(1, max_attempts + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            # Limit waits have their own budget, matching the checkin flow: a key
+            # can become available after the transient-request budget has elapsed.
+            api_key = self.key_pool.acquire(self.max_wait)
+            payload: dict[str, Any] = {"prefix": username or _random_mailbox_name()}
+            if self.domains:
+                domain, force_random_prefix = self._resolve_domain(random.choice(self.domains))
+                payload["domain"] = domain
+                if force_random_prefix:
+                    payload["prefix"] = _random_tempmail_prefix()
+
+            try:
+                data = self._request("POST", "/inbox/create", api_key=api_key, payload=payload, expected=(200, 201))
+            except _TempMailLolRequestError as error:
+                last_error = error
+                last_status = error.status_code
+                kind = _classify_tempmail_error(error)
+                if kind == "rate_limit":
+                    self.key_pool.mark_rate_limited(api_key)
+                    continue
+                if kind == "transient":
+                    time.sleep(min(backoff, max(0.0, deadline - time.monotonic())))
+                    backoff = min(backoff * 1.5, 8.0)
+                    continue
+                raise RuntimeError(f"TempMail.lol 创建失败 (HTTP {error.status_code}): {error}") from error
+
+            address = str(data.get("address") or "").strip()
+            token = str(data.get("token") or "").strip()
+            if not address or not token:
+                last_error = RuntimeError(f"TempMail.lol 响应缺少 address/token: {data}")
+                continue
+            _remember_tempmail_token_key(token, api_key)
+            return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "token": token}
+
+        raise RuntimeError(
+            f"TempMail.lol 创建邮箱多次失败 ({max_attempts} 次尝试，最后状态={last_status}): {last_error}"
+        )
+
+    @staticmethod
+    def _inbox_items(data: dict[str, Any]) -> list[dict[str, Any]]:
+        items = data.get("emails") or data.get("messages") or []
+        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+    def _message_from_item(self, mailbox: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+        text_content, html_content = _extract_content(item)
+        received_at = _parse_received_at(
+            item.get("created_at") or item.get("createdAt") or item.get("date") or item.get("received_at") or item.get("timestamp")
+        )
+        return {
+            "provider": self.name,
+            "mailbox": mailbox["address"],
+            "message_id": str(item.get("id") or item.get("message_id") or item.get("token") or item.get("date") or ""),
+            "subject": str(item.get("subject") or ""),
+            "sender": str(item.get("from") or item.get("from_address") or ""),
+            "text_content": text_content,
+            "html_content": html_content,
+            "received_at": received_at,
+            "raw": item,
+        }
+
+    def _mailbox_api_key(self, mailbox: dict[str, Any]) -> str:
+        remembered = _lookup_tempmail_token_key(str(mailbox.get("token") or ""))
+        return self.api_keys[0] if remembered is None else remembered
 
     def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
-        data = self._request("GET", "/inbox", params={"token": mailbox["token"]})
-        items = data.get("emails") or data.get("messages") or []
-        messages = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+        data = self._request(
+            "GET",
+            "/inbox",
+            api_key=self._mailbox_api_key(mailbox),
+            params={"token": mailbox["token"]},
+        )
+        messages = self._inbox_items(data)
         if not messages:
             return None
         item = max(messages, key=lambda value: ((_parse_received_at(value.get("created_at") or value.get("createdAt") or value.get("date") or value.get("received_at") or value.get("timestamp")) or datetime.fromtimestamp(0, tz=timezone.utc)).timestamp(), str(value.get("id") or value.get("token") or "")))
-        text_content, html_content = _extract_content(item)
-        return {"provider": self.name, "mailbox": mailbox["address"], "message_id": str(item.get("id") or item.get("token") or ""), "subject": str(item.get("subject") or ""), "sender": str(item.get("from") or item.get("from_address") or ""), "text_content": text_content, "html_content": html_content, "received_at": _parse_received_at(item.get("created_at") or item.get("createdAt") or item.get("date") or item.get("received_at") or item.get("timestamp")), "raw": item}
+        return self._message_from_item(mailbox, item)
+
+    def wait_for_code(self, mailbox: dict[str, Any]) -> str | None:
+        seen_value = mailbox.setdefault("_seen_code_message_refs", [])
+        if not isinstance(seen_value, list):
+            seen_value = []
+            mailbox["_seen_code_message_refs"] = seen_value
+        seen_refs = {str(item) for item in seen_value}
+
+        primary_key = self._mailbox_api_key(mailbox)
+        api_key = primary_key
+        consecutive_errors = 0
+        deadline = time.monotonic() + self.conf["wait_timeout"]
+
+        while time.monotonic() < deadline:
+            try:
+                data = self._request(
+                    "GET",
+                    "/inbox",
+                    api_key=api_key,
+                    params={"token": mailbox["token"]},
+                )
+                consecutive_errors = 0
+            except Exception:
+                consecutive_errors += 1
+                if consecutive_errors == 3:
+                    fallback = next((key for key in self.api_keys if key and key != primary_key), None)
+                    if fallback is not None:
+                        api_key = fallback
+                time.sleep(max(0.2, self.conf["wait_interval"]))
+                continue
+
+            messages = [self._message_from_item(mailbox, item) for item in self._inbox_items(data)]
+            messages.sort(
+                key=lambda message: (
+                    (message.get("received_at") or datetime.fromtimestamp(0, tz=timezone.utc)).timestamp(),
+                    str(message.get("message_id") or ""),
+                ),
+                reverse=True,
+            )
+            for message in messages:
+                if _message_before_code_boundary(mailbox, message):
+                    continue
+                ref = _message_tracking_ref(message)
+                if ref in seen_refs:
+                    continue
+                seen_refs.add(ref)
+                seen_value.append(ref)
+                code = _extract_code(message)
+                if code:
+                    return code
+            time.sleep(max(0.2, self.conf["wait_interval"]))
+        return None
 
     def close(self) -> None:
         self.session.close()
@@ -1517,12 +1912,37 @@ def wait_for_code(mail_config: dict, mailbox: dict) -> str | None:
         provider.close()
 
 
+def _is_account_creation_rate_limit(error: Exception | str | None) -> bool:
+    reason = str(error or "")
+    return "user_register_http_400" in reason and "account_creation_failed" in reason
+
+
+def mark_mailbox_rate_limited(mailbox: dict, *, reason: str = "", cooldown_seconds: float | None = None) -> bool:
+    if str(mailbox.get("provider") or "") != CloudflareTempMailProvider.name:
+        return False
+    key = str(mailbox.get("_rate_limit_cooldown_key") or "").strip()
+    if not key:
+        return False
+    try:
+        seconds = float(cooldown_seconds if cooldown_seconds is not None else mailbox.get("_rate_limit_cooldown_seconds") or 600)
+    except (TypeError, ValueError):
+        seconds = 600.0
+    activated = _activate_cloudflare_cooldown(key, seconds)
+    if activated:
+        label = f"{reason}，" if reason else ""
+        _provider_log(f"{label}按 HTTP 429 处理，CloudflareTempMail 所有线程暂停 {seconds:.0f} 秒后自动恢复")
+    return activated
+
+
 def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str | None = None) -> None:
     """注册流程结束后更新邮箱池状态。
 
     仅对 outlook_token 邮箱生效：成功标记 used；失败时若是 token 失效标记 token_invalid，
     其余失败标记 failed（保留邮箱占用以便排查，可通过重置释放）。
     """
+    reason = str(error or "").strip()
+    if not success and _is_account_creation_rate_limit(error):
+        mark_mailbox_rate_limited(mailbox, reason="OpenAI user_register account_creation_failed")
     if str(mailbox.get("provider") or "") != OutlookTokenProvider.name:
         return
     address = str(mailbox.get("address") or "").strip()
@@ -1531,7 +1951,6 @@ def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str 
     if success:
         _set_outlook_token_state(address, "used")
         return
-    reason = str(error or "").strip()
     if isinstance(error, OutlookTokenError) or "OutlookToken 刷新失败" in reason or "access_token" in reason:
         _set_outlook_token_state(address, "token_invalid", reason[:300])
     else:

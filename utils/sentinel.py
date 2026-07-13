@@ -105,6 +105,8 @@ SDK_ENTRYPOINTS = (
     "https://chatgpt.com/backend-api/sentinel/sdk.js",
 )
 SDK_RUNNER_PATH = Path(__file__).with_name("sentinel_sdk_runner.js")
+SDK_REQ_CAPTURE_ATTEMPTS = 3
+SDK_REQ_CAPTURE_RETRY_DELAY_SECONDS = 0.2
 
 
 @dataclass
@@ -302,14 +304,20 @@ def build_sentinel_headers_with_sdk(
     ch_ua = sec_ch_ua or DEFAULT_SENTINEL_SEC_CH_UA
     sdk_url, sdk_source, sdk_version = _discover_sdk(session, ua, ch_ua)
 
-    capture = _run_sdk(
-        sdk_source=sdk_source,
-        sdk_url=sdk_url,
-        flow=flow,
-        device_id=device_id,
-        user_agent=ua,
-    )
-    req_body = str(capture.get("capturedBody") or "").strip()
+    req_body = ""
+    for attempt in range(SDK_REQ_CAPTURE_ATTEMPTS):
+        capture = _run_sdk(
+            sdk_source=sdk_source,
+            sdk_url=sdk_url,
+            flow=flow,
+            device_id=device_id,
+            user_agent=ua,
+        )
+        req_body = str(capture.get("capturedBody") or "").strip()
+        if req_body:
+            break
+        if attempt + 1 < SDK_REQ_CAPTURE_ATTEMPTS:
+            time.sleep(SDK_REQ_CAPTURE_RETRY_DELAY_SECONDS)
     if not req_body:
         raise RuntimeError("sentinel_sdk_missing_req_body")
     if SENTINEL_ERROR_PREFIX in req_body:

@@ -51,7 +51,7 @@ export function RegisterCard() {
       enable: true,
       ...(type === "cloudmail_gen" ? { api_base: "", admin_email: "", admin_password: "", domain: [], subdomain: [], email_prefix: "" } : {}),
       ...(type === "cloudflare_temp_email" ? { api_base: "", admin_password: "", domain: [] } : {}),
-      ...(type === "tempmail_lol" ? { api_key: "", domain: [] } : {}),
+      ...(type === "tempmail_lol" ? { api_key: "", domain: [], rate_per_window: 24, window_seconds: 300, max_wait: 600, create_total_budget: 90 } : {}),
       ...(type === "moemail" ? { api_base: "", api_key: "", domain: [] } : {}),
       ...(type === "inbucket" ? { api_base: "", domain: [], random_subdomain: true } : {}),
       ...(type === "duckmail" ? { api_key: "", default_domain: "duckmail.sbs" } : {}),
@@ -251,11 +251,37 @@ export function RegisterCard() {
                           启用随机子域名
                         </label>
                       ) : null}
-                      {type === "tempmail_lol" || type === "moemail" || type === "duckmail" || type === "gptmail" || type === "yyds_mail" ? (
+                      {type === "tempmail_lol" ? (
+                        <div className="space-y-2">
+                          <label className="text-sm text-stone-700">API Keys</label>
+                          <Textarea value={String(provider.api_key || "")} onChange={(event) => updateProvider(index, { api_key: event.target.value })} placeholder={"每行一个 API Key；也支持逗号或空格分隔\n留空则使用匿名免费层级"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                        </div>
+                      ) : null}
+                      {type === "moemail" || type === "duckmail" || type === "gptmail" || type === "yyds_mail" ? (
                         <div className="space-y-2">
                           <label className="text-sm text-stone-700">API Key</label>
                           <Input value={String(provider.api_key || "")} onChange={(event) => updateProvider(index, { api_key: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
                         </div>
+                      ) : null}
+                      {type === "tempmail_lol" ? (
+                        <>
+                          <div className="space-y-2">
+                            <label className="text-sm text-stone-700">每窗口请求上限</label>
+                            <Input type="number" min={1} max={25} value={String(provider.rate_per_window ?? 24)} onChange={(event) => updateProvider(index, { rate_per_window: Number(event.target.value) })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm text-stone-700">限流窗口（秒）</label>
+                            <Input type="number" min={10} value={String(provider.window_seconds ?? 300)} onChange={(event) => updateProvider(index, { window_seconds: Number(event.target.value) })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm text-stone-700">全部 Key 限流时最长等待（秒）</label>
+                            <Input type="number" min={0} value={String(provider.max_wait ?? 600)} onChange={(event) => updateProvider(index, { max_wait: Number(event.target.value) })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm text-stone-700">网络错误重试预算（秒，不含限流等待）</label>
+                            <Input type="number" min={15} value={String(provider.create_total_budget ?? 90)} onChange={(event) => updateProvider(index, { create_total_budget: Number(event.target.value) })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                          </div>
+                        </>
                       ) : null}
                       {type === "duckmail" || type === "gptmail" ? (
                         <div className="space-y-2">
@@ -340,8 +366,9 @@ export function RegisterCard() {
 
                     {type === "cloudmail_gen" || type === "tempmail_lol" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "ddg_mail" ? (
                       <div className="space-y-2">
-                        <label className="text-sm text-stone-700">{type === "cloudmail_gen" ? "邮箱域名" : type === "inbucket" ? "基础域名列表" : "Domain"}</label>
-                        <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()) })} placeholder={type === "cloudmail_gen" ? "每行一个域名，留空则使用服务默认域名" : type === "inbucket" ? "每行一个基础域名，系统会自动生成随机子域名" : type === "moemail" ? "每行一个域名" : "每行一个域名，留空则使用服务默认域名"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                        <label className="text-sm text-stone-700">{type === "cloudmail_gen" ? "邮箱域名" : type === "inbucket" ? "基础域名列表" : type === "tempmail_lol" ? "自定义域名（支持多域名/通配子域）" : "Domain"}</label>
+                        <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()) })} placeholder={type === "cloudmail_gen" ? "每行一个域名，留空则使用服务默认域名" : type === "inbucket" ? "每行一个基础域名，系统会自动生成随机子域名" : type === "tempmail_lol" ? "example.com\n*.example.com" : type === "moemail" ? "每行一个域名" : "每行一个域名，留空则使用服务默认域名"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                        {type === "tempmail_lol" ? <p className="text-xs leading-5 text-stone-500">使用 <code>*.example.com</code> 时，每次创建都会随机生成子域名和邮箱前缀；请先在 TempMail.lol 后台配置 catch-all/通配解析。</p> : null}
                       </div>
                     ) : null}
                     {type === "cloudmail_gen" ? (

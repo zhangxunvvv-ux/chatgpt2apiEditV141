@@ -218,7 +218,8 @@ vm.runInContext(input.sdkSource, iframeContext, { timeout: 5000 });
 vm.runInContext(input.sdkSource, parentContext, { timeout: 5000 });
 
 (async () => {
-  const sdk = parentContext.SentinelSDK;
+  const sdk = parentContext.SentinelSDK || parentContext.window.SentinelSDK;
+  if (!sdk) throw new Error("SentinelSDK was not initialized");
   const token = await sdk.token(input.flow);
   if (input.waitMs) {
     await new Promise((resolve) => setTimeout(resolve, Number(input.waitMs)));

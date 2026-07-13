@@ -126,6 +126,9 @@ def step(index: int, text: str, color: str = "") -> None:
     log(f"[任务{index}] {text}", color)
 
 
+mail_provider.provider_log_sink = lambda text: log(text, "yellow")
+
+
 def _make_trace_headers() -> dict[str, str]:
     trace_id = str(random.getrandbits(64))
     parent_id = str(random.getrandbits(64))
