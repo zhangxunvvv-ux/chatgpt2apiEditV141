@@ -350,6 +350,12 @@ def request_with_local_retry(session: requests.Session, method: str, url: str, r
     return None, last_error
 
 
+def _otp_error_code(resp) -> str:
+    data = _response_json(resp) if resp is not None else {}
+    error = data.get("error") if isinstance(data, dict) else None
+    return str(error.get("code") or "").strip() if isinstance(error, dict) else ""
+
+
 def validate_otp(session: requests.Session, device_id: str, code: str):
     headers = dict(common_headers)
     headers["referer"] = f"{auth_base}/email-verification"
@@ -358,6 +364,8 @@ def validate_otp(session: requests.Session, device_id: str, code: str):
     resp, error = request_with_local_retry(session, "post", f"{auth_base}/api/accounts/email-otp/validate", json={"code": code}, headers=headers, verify=False)
     if resp is not None and resp.status_code == 200:
         return resp, ""
+    if _otp_error_code(resp) in {"wrong_email_otp_code", "email_otp_invalid", "invalid_code"}:
+        return resp, error
     headers["openai-sentinel-token"] = build_sentinel_token(session, device_id, "authorize_continue")
     resp, error = request_with_local_retry(session, "post", f"{auth_base}/api/accounts/email-otp/validate", json={"code": code}, headers=headers, verify=False)
     return resp, error
@@ -749,8 +757,14 @@ class PlatformRegistrar:
         self._follow_authorize_continue(str(data.get("continue_url") or "").strip(), f"{auth_base}/create-account/password", index)
         step(index, "提交注册密码完成")
 
-    def _send_otp(self, index: int) -> None:
+    def _send_otp(self, index: int, mailbox: dict[str, Any] | None = None) -> None:
         step(index, "开始发送验证码")
+        if mailbox is not None:
+            try:
+                mail_provider.prepare_code_baseline(_mail_config(self.proxy), mailbox)
+                step(index, "发送验证码前邮箱基线已记录")
+            except Exception as exc:
+                step(index, f"邮箱基线记录失败，继续发送验证码: {str(exc)[:160]}", "yellow")
         url = f"{auth_base}/api/accounts/email-otp/send"
         headers = _headers_with_clearance(self._navigate_headers(f"{auth_base}/create-account/password"), url, self.proxy, self.clearance_user_agent)
         resp, error = request_with_local_retry(self.session, "get", url, headers=headers, allow_redirects=True, verify=False)
@@ -777,6 +791,38 @@ class PlatformRegistrar:
                 pass
             raise RuntimeError(error or f"validate_otp_http_{getattr(resp, 'status_code', 'unknown')}_body={body}")
         step(index, "验证码校验完成")
+
+    def _validate_mailbox_otp(self, mailbox: dict[str, Any], index: int) -> None:
+        max_attempts = 4
+        last_detail = ""
+        for attempt in range(1, max_attempts + 1):
+            step(index, f"开始等待注册验证码（第 {attempt}/{max_attempts} 次）")
+            code = wait_for_code(mailbox, register_proxy=self.proxy)
+            if not code:
+                raise RuntimeError(last_detail or "等待注册验证码超时")
+            step(index, f"收到注册验证码: {code}")
+            step(index, f"开始校验验证码 {code}")
+            resp, error = validate_otp(self.session, self.device_id, code)
+            if resp is not None and resp.status_code == 200:
+                step(index, "验证码校验完成")
+                return
+
+            error_code = _otp_error_code(resp)
+            body = ""
+            try:
+                body = str(resp.text or "")[:500] if resp is not None else ""
+            except Exception:
+                pass
+            last_detail = error or f"validate_otp_http_{getattr(resp, 'status_code', 'unknown')}_body={body}"
+            retryable = error_code in {"wrong_email_otp_code", "email_otp_invalid", "invalid_code"}
+            if not retryable or attempt >= max_attempts:
+                raise RuntimeError(last_detail)
+
+            mail_provider.mark_verification_code_rejected(mailbox, code)
+            step(index, f"验证码被上游拒绝({error_code})，忽略该验证码并等待更新邮件", "yellow")
+            time.sleep(1.5)
+
+        raise RuntimeError(last_detail or "验证码校验失败")
 
     def _create_account(self, name: str, birthdate: str, index: int) -> None:
         step(index, "开始创建账号资料")
@@ -837,17 +883,22 @@ class PlatformRegistrar:
             first_name, last_name = _random_name()
             self._chatgpt_authorize(email, index)
             self._register_user(email, password, index)
-            self._send_otp(index)
-            step(index, "开始等待注册验证码")
-            code = wait_for_code(mailbox, register_proxy=self.proxy)
-            if not code:
-                raise RuntimeError("等待注册验证码超时")
-            step(index, f"收到注册验证码: {code}")
-            self._validate_otp(code, index)
+            self._send_otp(index, mailbox)
+            self._validate_mailbox_otp(mailbox, index)
             self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
             chatgpt_session = self._finish_chatgpt_registration(index)
-            self._platform_authorize(email, index, screen_hint="login")
-            tokens = self._exchange_registered_tokens(index)
+            tokens: dict = {}
+            try:
+                self._platform_authorize(email, index, screen_hint="login")
+                tokens = self._exchange_registered_tokens(index)
+            except Exception as oauth_error:
+                # The ChatGPT session is already usable. Keep the account when
+                # the optional Platform OAuth refresh-token flow is intermittent.
+                step(
+                    index,
+                    f"Platform OAuth refresh token 获取失败，保留 ChatGPT session 账号: {str(oauth_error)[:240]}",
+                    "yellow",
+                )
         except Exception as error:
             mail_provider.mark_mailbox_result(mailbox, success=False, error=error)
             raise

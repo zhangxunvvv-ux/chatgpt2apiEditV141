@@ -40,7 +40,7 @@ class ChatGPTSessionTokenRegistrationTests(unittest.TestCase):
         registrar._chatgpt_authorize = mock.Mock()
         registrar._register_user = mock.Mock()
         registrar._send_otp = mock.Mock()
-        registrar._validate_otp = mock.Mock()
+        registrar._validate_mailbox_otp = mock.Mock()
         registrar._create_account = mock.Mock()
         registrar._finish_chatgpt_registration = mock.Mock(return_value={
             "access_token": "chatgpt-session-access",
@@ -56,7 +56,6 @@ class ChatGPTSessionTokenRegistrationTests(unittest.TestCase):
 
         with (
             mock.patch.object(openai_register, "create_mailbox", return_value={"address": "user@example.com"}),
-            mock.patch.object(openai_register, "wait_for_code", return_value="123456"),
             mock.patch.object(openai_register.mail_provider, "mark_mailbox_result"),
         ):
             result = registrar.register(1)
@@ -68,6 +67,35 @@ class ChatGPTSessionTokenRegistrationTests(unittest.TestCase):
         self.assertEqual(result["session_token"], "chatgpt-session-id")
         self.assertEqual(result["cookie"], "next-auth=session")
         registrar._platform_authorize.assert_called_once_with("user@example.com", 1, screen_hint="login")
+
+    def test_registration_keeps_chatgpt_session_when_platform_oauth_fails(self) -> None:
+        registrar = openai_register.PlatformRegistrar("")
+        registrar._chatgpt_authorize = mock.Mock()
+        registrar._register_user = mock.Mock()
+        registrar._send_otp = mock.Mock()
+        registrar._validate_mailbox_otp = mock.Mock()
+        registrar._create_account = mock.Mock()
+        registrar._finish_chatgpt_registration = mock.Mock(return_value={
+            "access_token": "chatgpt-session-access",
+            "session_token": "chatgpt-session-id",
+            "cookie": "next-auth=session",
+        })
+        registrar._platform_authorize = mock.Mock(side_effect=RuntimeError("platform_authorize_missing_code"))
+        registrar._exchange_registered_tokens = mock.Mock()
+
+        with (
+            mock.patch.object(openai_register, "create_mailbox", return_value={"address": "user@example.com"}),
+            mock.patch.object(openai_register.mail_provider, "mark_mailbox_result") as mark_result,
+        ):
+            result = registrar.register(1)
+
+        registrar.close()
+        self.assertEqual(result["access_token"], "chatgpt-session-access")
+        self.assertEqual(result["platform_access_token"], "")
+        self.assertEqual(result["refresh_token"], "")
+        self.assertEqual(result["session_token"], "chatgpt-session-id")
+        registrar._exchange_registered_tokens.assert_not_called()
+        mark_result.assert_called_once_with({"address": "user@example.com"}, success=True)
 
 
 if __name__ == "__main__":

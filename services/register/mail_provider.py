@@ -8,7 +8,7 @@ import re
 import string
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email import message_from_bytes, message_from_string, policy
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
@@ -419,6 +419,30 @@ def _message_before_code_boundary(mailbox: dict[str, Any], message: dict[str, An
     return received_at < boundary
 
 
+def _rejected_code_set(mailbox: dict[str, Any]) -> set[str]:
+    values = mailbox.setdefault("_rejected_verification_codes", [])
+    if not isinstance(values, list):
+        values = []
+        mailbox["_rejected_verification_codes"] = values
+    return {str(value) for value in values if str(value)}
+
+
+def mark_verification_code_rejected(mailbox: dict[str, Any], code: str) -> None:
+    normalized = re.sub(r"\D", "", str(code or ""))[:6]
+    if not normalized:
+        return
+    values = mailbox.setdefault("_rejected_verification_codes", [])
+    if not isinstance(values, list):
+        values = []
+        mailbox["_rejected_verification_codes"] = values
+    if normalized not in values:
+        values.append(normalized)
+
+
+def _verification_code_rejected(mailbox: dict[str, Any], code: str | None) -> bool:
+    return bool(code and code in _rejected_code_set(mailbox))
+
+
 class BaseMailProvider:
     name = "unknown"
 
@@ -451,12 +475,42 @@ class BaseMailProvider:
             if ref in seen_refs:
                 return None
             code = _extract_code(message)
-            if code:
+            if code and not _verification_code_rejected(mailbox, code):
                 seen_value.append(ref)
                 seen_refs.add(ref)
-            return code
+                return code
+            return None
 
         return self.wait_for(mailbox, extract_unseen_code)
+
+    def prepare_code_baseline(self, mailbox: dict[str, Any]) -> None:
+        messages: list[dict[str, Any]] = []
+        fetch_recent = getattr(self, "fetch_recent_messages", None)
+        if callable(fetch_recent):
+            recent = fetch_recent(mailbox)
+            if isinstance(recent, list):
+                messages.extend(message for message in recent if isinstance(message, dict))
+        else:
+            latest = self.fetch_latest_message(mailbox)
+            if isinstance(latest, dict):
+                messages.append(latest)
+
+        seen_value = mailbox.setdefault("_seen_code_message_refs", [])
+        if not isinstance(seen_value, list):
+            seen_value = []
+            mailbox["_seen_code_message_refs"] = seen_value
+        seen_refs = {str(value) for value in seen_value}
+        for message in messages:
+            ref = _message_tracking_ref(message)
+            if ref not in seen_refs:
+                seen_value.append(ref)
+                seen_refs.add(ref)
+            code = _extract_code(message)
+            if code:
+                mark_verification_code_rejected(mailbox, code)
+        # Provider and host clocks can differ slightly; baseline refs/codes still
+        # prevent pre-existing mail from being selected inside this skew window.
+        mailbox["_code_not_before"] = datetime.now(timezone.utc) - timedelta(minutes=2)
 
     def close(self) -> None:
         pass
@@ -1202,7 +1256,7 @@ class TempMailLolProvider(BaseMailProvider):
                 seen_refs.add(ref)
                 seen_value.append(ref)
                 code = _extract_code(message)
-                if code:
+                if code and not _verification_code_rejected(mailbox, code):
                     return code
             time.sleep(max(0.2, self.conf["wait_interval"]))
         return None
@@ -1815,7 +1869,7 @@ class OutlookTokenProvider(BaseMailProvider):
                 if ref in seen_refs:
                     continue
                 code = _extract_code(message)
-                if code:
+                if code and not _verification_code_rejected(mailbox, code):
                     seen_value.append(ref)
                     return code
                 seen_refs.add(ref)
@@ -1908,6 +1962,14 @@ def wait_for_code(mail_config: dict, mailbox: dict) -> str | None:
     provider = _create_provider(mail_config, str(mailbox.get("provider") or ""), str(mailbox.get("provider_ref") or ""))
     try:
         return provider.wait_for_code(mailbox)
+    finally:
+        provider.close()
+
+
+def prepare_code_baseline(mail_config: dict, mailbox: dict) -> None:
+    provider = _create_provider(mail_config, str(mailbox.get("provider") or ""), str(mailbox.get("provider_ref") or ""))
+    try:
+        provider.prepare_code_baseline(mailbox)
     finally:
         provider.close()
 
