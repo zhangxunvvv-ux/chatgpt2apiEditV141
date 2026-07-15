@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import base64
 import unittest
+from io import BytesIO
 from unittest import mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from PIL import Image
 
 import api.ai as ai_module
+from services.protocol.openai_v1_image_edit import _composite_mask
 
 
 AUTH_HEADERS = {"Authorization": "Bearer chatgpt2api"}
@@ -66,6 +69,23 @@ class ImagesEditsApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400, response.text)
         self.assertIn("file_id image references are not supported", response.text)
         self.assertEqual(self.handle_calls, [])
+
+    def test_mask_transparent_pixels_mark_the_edit_region(self):
+        source_buffer = BytesIO()
+        Image.new("RGBA", (2, 1), (20, 40, 60, 255)).save(source_buffer, format="PNG")
+        mask = Image.new("L", (2, 1), 255)
+        mask.putpixel((0, 0), 0)
+        mask_buffer = BytesIO()
+        mask.save(mask_buffer, format="PNG")
+
+        result = _composite_mask(
+            [(source_buffer.getvalue(), "source.png", "image/png")],
+            [(mask_buffer.getvalue(), "mask.png", "image/png")],
+        )
+        composited = Image.open(BytesIO(result[0][0])).convert("RGBA")
+
+        self.assertEqual(composited.getpixel((0, 0))[3], 0)
+        self.assertEqual(composited.getpixel((1, 0))[3], 255)
 
 
 if __name__ == "__main__":

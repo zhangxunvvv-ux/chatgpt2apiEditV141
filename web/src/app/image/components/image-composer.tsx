@@ -3,7 +3,7 @@ import { ArrowUp, BookOpenText, ChevronDown, ImagePlus, Images, Info, LoaderCirc
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type RefObject } from "react";
 import { toast } from "sonner";
 
-import { ImageLightbox } from "@/components/image-lightbox";
+import { ImageMarkupEditor } from "@/app/image/components/image-markup-editor";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -17,6 +17,7 @@ import {
 import type { ImageModel } from "@/lib/api";
 import type { MaterialLibraryItem, PromptLibraryItem } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import type { StoredReferenceImage } from "@/store/image-conversations";
 
 type ImageComposerProps = {
   prompt: string;
@@ -35,7 +36,7 @@ type ImageComposerProps = {
   selectedMaterialIds: string[];
   availableQuota: string;
   activeTaskCount: number;
-  referenceImages: Array<{ name: string; dataUrl: string }>;
+  referenceImages: StoredReferenceImage[];
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   fileInputRef: RefObject<HTMLInputElement | null>;
   onPromptChange: (value: string) => void;
@@ -52,6 +53,7 @@ type ImageComposerProps = {
   onPickReferenceImage: () => void;
   onReferenceImageChange: (files: File[]) => void | Promise<void>;
   onRemoveReferenceImage: (index: number) => void;
+  onUpdateReferenceImage: (index: number, patch: Partial<StoredReferenceImage>) => void;
 };
 
 const imageFileNamePattern = /\.(avif|bmp|gif|heic|heif|ico|jpe?g|png|svg|tiff?|webp)$/i;
@@ -131,9 +133,9 @@ export function ImageComposer({
   onPickReferenceImage,
   onReferenceImageChange,
   onRemoveReferenceImage,
+  onUpdateReferenceImage,
 }: ImageComposerProps) {
-  const [lightboxOpen, setLightboxOpen] = useState(false);
-  const [lightboxIndex, setLightboxIndex] = useState(0);
+  const [editingReferenceIndex, setEditingReferenceIndex] = useState<number | null>(null);
   const [isSizeMenuOpen, setIsSizeMenuOpen] = useState(false);
   const [isDraggingImage, setIsDraggingImage] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
@@ -143,10 +145,7 @@ export function ImageComposer({
   const sizeMenuRef = useRef<HTMLDivElement>(null);
   const sizeMenuBtnRef = useRef<HTMLButtonElement>(null);
   const optimizeAbortRef = useRef<AbortController | null>(null);
-  const lightboxImages = useMemo(
-    () => referenceImages.map((image, index) => ({ id: `${image.name}-${index}`, src: image.dataUrl })),
-    [referenceImages],
-  );
+  const editingReferenceImage = editingReferenceIndex === null ? null : referenceImages[editingReferenceIndex] || null;
   const modelOptions = useMemo(
     () => imageModels.map((model) => ({ value: model, label: model })),
     [imageModels],
@@ -440,6 +439,18 @@ export function ImageComposer({
             void onReferenceImageChange(Array.from(event.target.files || []));
           }}
         />
+        <ImageMarkupEditor
+          open={editingReferenceIndex !== null}
+          image={editingReferenceImage}
+          onOpenChange={(open) => {
+            if (!open) setEditingReferenceIndex(null);
+          }}
+          onSave={(patch) => {
+            if (editingReferenceIndex === null) return;
+            onUpdateReferenceImage(editingReferenceIndex, patch);
+            toast.success("蒙版与标注已应用，发送时会随参考图一起上传");
+          }}
+        />
 
         {referenceImages.length > 0 ? (
           <div className="mb-2 flex gap-2 overflow-x-auto px-1 pb-1 sm:mb-3 sm:flex-wrap sm:overflow-visible sm:pb-0">
@@ -447,19 +458,25 @@ export function ImageComposer({
               <div key={`${image.name}-${index}`} className="relative size-14 shrink-0 sm:size-16">
                 <button
                   type="button"
-                  onClick={() => {
-                    setLightboxIndex(index);
-                    setLightboxOpen(true);
-                  }}
-                  className="group size-14 overflow-hidden rounded-2xl border border-stone-200 bg-stone-50 transition hover:border-stone-300 sm:size-16"
-                  aria-label={`预览参考图 ${image.name || index + 1}`}
+                  onClick={() => setEditingReferenceIndex(index)}
+                  className="group relative size-14 overflow-hidden rounded-2xl border border-stone-200 bg-stone-50 transition hover:border-emerald-400 hover:ring-2 hover:ring-emerald-100 sm:size-16"
+                  aria-label={`编辑参考图蒙版和标注 ${image.name || index + 1}`}
                 >
                   <img
-                    src={image.dataUrl}
+                    src={image.annotationDataUrl || image.dataUrl}
                     alt={image.name || `参考图 ${index + 1}`}
                     className="h-full w-full object-cover"
                   />
+                  <span className="absolute inset-x-1 bottom-1 translate-y-5 rounded-md bg-stone-950/80 py-0.5 text-[9px] font-medium text-white transition group-hover:translate-y-0">
+                    涂抹编辑
+                  </span>
                 </button>
+                {image.maskDataUrl || image.annotationDataUrl ? (
+                  <div className="pointer-events-none absolute -bottom-1 left-1/2 flex -translate-x-1/2 gap-1">
+                    {image.maskDataUrl ? <span className="rounded-full bg-emerald-500 px-1.5 py-0.5 text-[8px] font-semibold leading-none text-white shadow">蒙版</span> : null}
+                    {image.annotationDataUrl ? <span className="rounded-full bg-orange-500 px-1.5 py-0.5 text-[8px] font-semibold leading-none text-white shadow">标注</span> : null}
+                  </div>
+                ) : null}
                 <button
                   type="button"
                   onClick={(event) => {
@@ -492,13 +509,6 @@ export function ImageComposer({
               textareaRef.current?.focus();
             }}
           >
-            <ImageLightbox
-              images={lightboxImages}
-              currentIndex={lightboxIndex}
-              open={lightboxOpen}
-              onOpenChange={setLightboxOpen}
-              onIndexChange={setLightboxIndex}
-            />
             <div
               className="absolute right-3 top-3 z-10 flex max-w-[calc(100%-1.5rem)] items-center gap-1.5 sm:right-4 sm:top-4 sm:max-w-[calc(100%-2rem)]"
               onClick={(event) => event.stopPropagation()}

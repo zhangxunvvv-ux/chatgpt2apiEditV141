@@ -100,6 +100,24 @@ class ImageTasksApiTests(unittest.TestCase):
         images = self.fake_service.edit_calls[0][1]["images"]
         self.assertEqual(len(images), 2)
 
+    def test_create_edit_task_forwards_masks_in_upload_order(self):
+        response = self.client.post(
+            "/api/image-tasks/edits",
+            headers=AUTH_HEADERS,
+            data={"client_task_id": "edit-mask-1", "prompt": "replace plane", "model": "gpt-image-2"},
+            files=[
+                ("image", ("one.png", b"image-one", "image/png")),
+                ("image", ("two.png", b"image-two", "image/png")),
+                ("mask", ("one-mask.png", b"mask-one", "image/png")),
+                ("mask", ("two-mask.png", b"mask-two", "image/png")),
+            ],
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        call = self.fake_service.edit_calls[0][1]
+        self.assertEqual([item[0] for item in call["images"]], [b"image-one", b"image-two"])
+        self.assertEqual([item[0] for item in call["masks"]], [b"mask-one", b"mask-two"])
+
     def test_create_edit_task_accepts_image_url(self):
         """测试图片编辑任务接口支持表单 image_url 引用。"""
         response = self.client.post(

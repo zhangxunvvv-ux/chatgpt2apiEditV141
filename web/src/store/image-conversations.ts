@@ -6,10 +6,27 @@ import type { ImageModel } from "@/lib/api";
 
 export type ImageConversationMode = "generate" | "edit";
 
+export type ImageMarkupTool = "mask" | "pen" | "arrow" | "eraser";
+
+export type ImageMarkupPoint = {
+  x: number;
+  y: number;
+};
+
+export type ImageMarkupAction = {
+  id: string;
+  tool: ImageMarkupTool;
+  width: number;
+  points: ImageMarkupPoint[];
+};
+
 export type StoredReferenceImage = {
   name: string;
   type: string;
   dataUrl: string;
+  maskDataUrl?: string;
+  annotationDataUrl?: string;
+  markupActions?: ImageMarkupAction[];
 };
 
 export type StoredImage = {
@@ -97,10 +114,43 @@ function normalizeStoredImage(image: StoredImage): StoredImage {
 }
 
 function normalizeReferenceImage(image: StoredReferenceImage): StoredReferenceImage {
+  const markupActions = Array.isArray(image.markupActions)
+    ? image.markupActions.flatMap((action, index) => {
+        if (
+          !action ||
+          !["mask", "pen", "arrow", "eraser"].includes(action.tool) ||
+          !Array.isArray(action.points)
+        ) {
+          return [];
+        }
+        const points = action.points.flatMap((point) => {
+          const x = Number(point?.x);
+          const y = Number(point?.y);
+          return Number.isFinite(x) && Number.isFinite(y)
+            ? [{ x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) }]
+            : [];
+        });
+        if (points.length === 0) {
+          return [];
+        }
+        return [{
+          id: String(action.id || `markup-${index}`),
+          tool: action.tool,
+          width: Math.min(0.2, Math.max(0.002, Number(action.width) || 0.032)),
+          points,
+        }];
+      })
+    : undefined;
   return {
     name: image.name || "reference.png",
     type: image.type || "image/png",
     dataUrl: image.dataUrl,
+    maskDataUrl: typeof image.maskDataUrl === "string" && image.maskDataUrl ? image.maskDataUrl : undefined,
+    annotationDataUrl:
+      typeof image.annotationDataUrl === "string" && image.annotationDataUrl
+        ? image.annotationDataUrl
+        : undefined,
+    markupActions: markupActions?.length ? markupActions : undefined,
   };
 }
 

@@ -569,12 +569,16 @@ export async function createImageEditTask(
   model?: ImageModel,
   size?: string,
   quality = "auto",
+  masks: File[] = [],
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
 
   uploadFiles.forEach((file) => {
     formData.append("image", file);
+  });
+  masks.forEach((file) => {
+    formData.append("mask", file);
   });
   formData.append("client_task_id", clientTaskId);
   formData.append("prompt", prompt);

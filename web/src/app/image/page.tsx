@@ -164,6 +164,62 @@ function dataUrlToFile(dataUrl: string, fileName: string, mimeType?: string) {
   return new File([bytes], fileName, { type: mimeType || matchedMimeType || "image/png" });
 }
 
+function createOpaqueMaskFile(fileName: string) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1;
+  canvas.height = 1;
+  const context = canvas.getContext("2d");
+  if (context) {
+    context.fillStyle = "rgba(255, 255, 255, 1)";
+    context.fillRect(0, 0, 1, 1);
+  }
+  return dataUrlToFile(canvas.toDataURL("image/png"), fileName, "image/png");
+}
+
+function buildReferenceRequestPayload(referenceImages: StoredReferenceImage[]) {
+  const sourceFiles = referenceImages.map((image, index) =>
+    dataUrlToFile(image.dataUrl, image.name || `reference-${index + 1}.png`, image.type),
+  );
+  const annotationGuides = referenceImages.flatMap((image, index) =>
+    image.annotationDataUrl
+      ? [dataUrlToFile(image.annotationDataUrl, `annotation-guide-${index + 1}.png`, "image/png")]
+      : [],
+  );
+  const hasMask = referenceImages.some((image) => Boolean(image.maskDataUrl));
+  const maskFiles = hasMask
+    ? [
+        ...referenceImages.map((image, index) =>
+          image.maskDataUrl
+            ? dataUrlToFile(image.maskDataUrl, `mask-${index + 1}.png`, "image/png")
+            : createOpaqueMaskFile(`mask-preserve-${index + 1}.png`),
+        ),
+        ...annotationGuides.map((_, index) => createOpaqueMaskFile(`annotation-preserve-${index + 1}.png`)),
+      ]
+    : [];
+
+  return {
+    imageFiles: [...sourceFiles, ...annotationGuides],
+    maskFiles,
+    hasMask,
+    hasAnnotations: annotationGuides.length > 0,
+  };
+}
+
+function addReferenceMarkupInstructions(
+  prompt: string,
+  options: { hasMask: boolean; hasAnnotations: boolean },
+) {
+  const instructions = [
+    options.hasMask ? "只修改参考图透明蒙版标出的区域，未选区域尽量保持原样。" : "",
+    options.hasAnnotations
+      ? "附加的橙红色钢笔圈线和箭头仅用于定位编辑目标，最终图片中不要保留任何标注线或箭头。"
+      : "",
+  ].filter(Boolean);
+  return instructions.length > 0
+    ? `${prompt}\n\n[局部编辑说明]\n${instructions.join("\n")}`
+    : prompt;
+}
+
 function filterImageModels(items: Model[]): ImageModel[] {
   return items
     .map((item) => String(item.id || "").trim())
@@ -1264,6 +1320,14 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     setReferenceImages((prev) => prev.filter((_, currentIndex) => currentIndex !== index));
   }, []);
 
+  const handleUpdateReferenceImage = useCallback((index: number, patch: Partial<StoredReferenceImage>) => {
+    setReferenceImages((current) =>
+      current.map((image, currentIndex) =>
+        currentIndex === index ? { ...image, ...patch } : image,
+      ),
+    );
+  }, []);
+
   const handleContinueEdit = useCallback(
     async (conversationId: string, image: StoredImage | StoredReferenceImage) => {
       try {
@@ -1443,10 +1507,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
       try {
 
-        const referenceFiles = activeTurn.referenceImages.map((image, index) =>
-          dataUrlToFile(image.dataUrl, image.name || `${activeTurn.id}-${index + 1}.png`, image.type),
-        );
-        if (activeTurn.mode === "edit" && referenceFiles.length === 0) {
+        const referencePayload = buildReferenceRequestPayload(activeTurn.referenceImages);
+        const requestPrompt = addReferenceMarkupInstructions(activeTurn.prompt, referencePayload);
+        if (activeTurn.mode === "edit" && referencePayload.imageFiles.length === 0) {
           throw new Error("未找到可用于继续编辑的参考图");
         }
 
@@ -1455,7 +1518,15 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           pendingImages.map((image) => {
             const taskId = image.taskId || image.id;
             return activeTurn.mode === "edit"
-              ? createImageEditTask(taskId, referenceFiles, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality)
+              ? createImageEditTask(
+                  taskId,
+                  referencePayload.imageFiles,
+                  requestPrompt,
+                  activeTurn.model,
+                  activeTurn.size,
+                  activeTurn.quality,
+                  referencePayload.maskFiles,
+                )
               : createImageGenerationTask(taskId, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality);
           }),
         );
@@ -1506,7 +1577,15 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
               const resubmitted = await Promise.all(
                 missingImages.map((image) =>
                   activeTurn.mode === "edit"
-                    ? createImageEditTask(image.taskId || image.id, referenceFiles, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality)
+                    ? createImageEditTask(
+                        image.taskId || image.id,
+                        referencePayload.imageFiles,
+                        requestPrompt,
+                        activeTurn.model,
+                        activeTurn.size,
+                        activeTurn.quality,
+                        referencePayload.maskFiles,
+                      )
                     : createImageGenerationTask(image.taskId || image.id, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality),
                 ),
               );
@@ -2062,6 +2141,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             onPickReferenceImage={() => fileInputRef.current?.click()}
             onReferenceImageChange={handleReferenceImageChange}
             onRemoveReferenceImage={handleRemoveReferenceImage}
+            onUpdateReferenceImage={handleUpdateReferenceImage}
           />
         </div>
 
