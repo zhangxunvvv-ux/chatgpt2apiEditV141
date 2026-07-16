@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from services.config import config
 from services.image_task_service import ImageTaskService
 
 
@@ -144,6 +147,160 @@ class ImageTaskServiceTests(unittest.TestCase):
 
             self.assertEqual([item["status"] for item in result["items"]], ["error", "error"])
             self.assertTrue(all("已中断" in item.get("error", "") for item in result["items"]))
+
+    def test_redundant_generation_returns_first_success_without_waiting_for_slow_copy(self):
+        with tempfile.TemporaryDirectory() as tmp_dir, mock.patch.dict(
+            config.data,
+            {
+                "image_redundant_generation_enabled": True,
+                "image_redundant_copies": 2,
+                "image_redundant_max_attempts": 1,
+            },
+        ):
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json")
+            call_lock = threading.Lock()
+            slow_started = threading.Event()
+            slow_cancelled = threading.Event()
+            calls = 0
+
+            def handler(payload):
+                nonlocal calls
+                with call_lock:
+                    calls += 1
+                    current = calls
+                if current == 1:
+                    slow_started.set()
+                    while not payload["cancel_event"].is_set():
+                        time.sleep(0.005)
+                    slow_cancelled.set()
+                    raise RuntimeError("cancelled loser")
+                self.assertTrue(slow_started.wait(0.5))
+                return {"data": [{"url": "http://example.test/fast.png"}]}
+
+            started = time.monotonic()
+            result = service._run_redundant_handler(
+                handler,
+                {"cancel_event": threading.Event(), "_batch_size": 1},
+                "missing-task",
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(result["data"][0]["url"], "http://example.test/fast.png")
+            self.assertLess(elapsed, 0.5)
+            self.assertTrue(slow_cancelled.wait(1.0))
+            self.assertEqual(calls, 2)
+
+    def test_batch_generation_disables_redundant_copies(self):
+        with tempfile.TemporaryDirectory() as tmp_dir, mock.patch.dict(
+            config.data,
+            {
+                "image_redundant_generation_enabled": True,
+                "image_redundant_copies": 2,
+                "image_redundant_max_attempts": 3,
+            },
+        ):
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json")
+            calls = 0
+
+            def handler(_payload):
+                nonlocal calls
+                calls += 1
+                return {"data": [{"url": "http://example.test/batch.png"}]}
+
+            result = service._run_redundant_handler(
+                handler,
+                {"cancel_event": threading.Event(), "_batch_size": 10},
+                "missing-task",
+            )
+
+            self.assertEqual(result["data"][0]["url"], "http://example.test/batch.png")
+            self.assertEqual(calls, 1)
+
+            def failing_handler(_payload):
+                nonlocal calls
+                calls += 1
+                raise RuntimeError("batch attempt failed")
+
+            calls = 0
+            with self.assertRaisesRegex(RuntimeError, "batch attempt failed"):
+                service._run_redundant_handler(
+                    failing_handler,
+                    {"cancel_event": threading.Event(), "_batch_size": 10},
+                    "missing-task",
+                )
+            self.assertEqual(calls, 1)
+
+    def test_live_worker_is_not_marked_failed_by_outer_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp_dir, mock.patch.dict(
+            config.data,
+            {
+                "image_poll_timeout_secs": 1,
+                "image_redundant_generation_enabled": False,
+            },
+        ):
+            started = threading.Event()
+            release = threading.Event()
+
+            def handler(_payload):
+                started.set()
+                self.assertTrue(release.wait(2.0))
+                return {"data": [{"url": "http://example.test/late-success.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service.submit_generation(
+                OWNER,
+                client_task_id="slow-success",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            self.assertTrue(started.wait(1.0))
+            key = "owner-1:slow-success"
+            with service._lock:
+                service._tasks[key]["created_ts"] = time.time() - 100
+
+            running = service.list_tasks(OWNER, ["slow-success"])["items"][0]
+            self.assertEqual(running["status"], "running")
+
+            release.set()
+            completed = wait_for_task(service, OWNER, "slow-success", "success")
+            self.assertEqual(completed["data"][0]["url"], "http://example.test/late-success.png")
+
+    def test_stop_task_signals_running_handler(self):
+        with tempfile.TemporaryDirectory() as tmp_dir, mock.patch.dict(
+            config.data,
+            {"image_redundant_generation_enabled": False},
+        ):
+            started = threading.Event()
+            cancelled = threading.Event()
+
+            def handler(payload):
+                started.set()
+                while not payload["cancel_event"].is_set():
+                    time.sleep(0.005)
+                cancelled.set()
+                raise RuntimeError("stopped")
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service.submit_generation(
+                OWNER,
+                client_task_id="stoppable",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            self.assertTrue(started.wait(1.0))
+
+            stopped = service.stop_task(OWNER, "stoppable")
+
+            self.assertEqual(stopped["status"], "error")
+            self.assertTrue(cancelled.wait(1.0))
+            deadline = time.time() + 1.0
+            while time.time() < deadline and service._workers:
+                time.sleep(0.01)
+            self.assertEqual(service._workers, {})
 
 
 if __name__ == "__main__":

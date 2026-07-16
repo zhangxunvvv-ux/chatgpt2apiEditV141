@@ -17,6 +17,7 @@ class ImageGenerationTaskRequest(BaseModel):
     model: str = "gpt-image-2"
     size: str | None = None
     quality: str = "auto"
+    batch_size: int = Field(default=1, ge=1, le=10)
 
 
 class ResumePollRequest(BaseModel):
@@ -65,6 +66,7 @@ def create_router() -> APIRouter:
                 size=body.size,
                 quality=body.quality,
                 base_url=resolve_image_base_url(request),
+                batch_size=body.batch_size,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
@@ -96,6 +98,7 @@ def create_router() -> APIRouter:
                 base_url=resolve_image_base_url(request),
                 images=images,
                 masks=masks,
+                batch_size=int(payload.get("batch_size") or 1),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc

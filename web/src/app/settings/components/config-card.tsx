@@ -169,7 +169,7 @@ export function ConfigCard() {
               placeholder="100"
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
-            <p className="text-xs text-stone-500">单位秒，等待上游图片结果的最长时间。</p>
+            <p className="text-xs text-stone-500">单位秒，每次上游生图尝试独立计算；其他图片成功后会立即显示，不受同批慢任务影响。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">生图默认内部模型</label>
@@ -209,7 +209,7 @@ export function ConfigCard() {
               />
               生图后台冗余生成
             </label>
-            <p className="text-xs text-stone-500">开启后，一个前台图片任务会在后台并发生成多份，成功的显示，失败的不显示。</p>
+            <p className="text-xs text-stone-500">仅单张任务启用；首个副本成功后立即显示并取消其余副本。批量生图会自动关闭冗余，避免放大并发。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">冗余并发份数</label>
@@ -220,7 +220,7 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white disabled:cursor-not-allowed disabled:opacity-50"
               disabled={config?.image_redundant_generation_enabled === false}
             />
-            <p className="text-xs text-stone-500">建议 2。请求 1 张图时后台同时跑 2 份，两份都成功就显示 2 张。</p>
+            <p className="text-xs text-stone-500">建议 2。请求 1 张图时后台同时尝试 2 份，只返回最先成功的一份。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">冗余最大重试轮数</label>

@@ -1528,8 +1528,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                   activeTurn.size,
                   activeTurn.quality,
                   referencePayload.maskFiles,
+                  activeTurn.images.length,
                 )
-              : createImageGenerationTask(taskId, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality);
+              : createImageGenerationTask(taskId, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality, activeTurn.images.length);
           }),
         );
         await applyTasks(submitted);
@@ -1552,6 +1553,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             const taskList = await fetchImageTasks(loadingTaskIds);
             consecutiveErrors = 0;
             if (taskList.items.length > 0) {
+              // Apply every terminal result from this poll immediately. A timeout
+              // dialog for one image must never delay successful sibling images.
+              await applyTasks(taskList.items);
               // 检测是否有超时错误且需要显示重试按钮
               const timeoutTask = taskList.items.find(
                 (task) =>
@@ -1566,10 +1570,6 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                   taskId: timeoutTask.id,
                   taskError: timeoutTask.error || "生图超时",
                 });
-                // 应用超时错误到对应图片，显示继续等待按钮
-                await applyTasks([timeoutTask]);
-              } else {
-                await applyTasks(taskList.items);
               }
             }
             if (taskList.missing_ids.length > 0 && latestTurn) {
@@ -1587,8 +1587,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                         activeTurn.size,
                         activeTurn.quality,
                         referencePayload.maskFiles,
+                        activeTurn.images.length,
                       )
-                    : createImageGenerationTask(image.taskId || image.id, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality),
+                    : createImageGenerationTask(image.taskId || image.id, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality, activeTurn.images.length),
                 ),
               );
               if (resubmitted.length > 0) {

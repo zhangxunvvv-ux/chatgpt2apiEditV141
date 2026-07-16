@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 from unittest import mock
 
@@ -60,6 +61,31 @@ class ImageNonBlockingTests(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertEqual(accounts.releases, ["token-a"])
         self.assertEqual(accounts.results, [("token-a", True, False)])
+
+    def test_cooperative_cancel_releases_slot_without_counting_failure(self) -> None:
+        accounts = _FakeAccountService()
+        cancel_event = threading.Event()
+
+        def fake_stream(_backend, request, _index, _total):
+            cancel_event.set()
+            request.progress_callback({"step": "submitting"})
+            return iter(())
+
+        request = conversation.ConversationRequest(
+            model="gpt-image-2",
+            prompt="cat",
+            cancel_event=cancel_event,
+        )
+        with (
+            mock.patch.object(conversation, "account_service", accounts),
+            mock.patch.object(conversation, "OpenAIBackendAPI", _FakeBackend),
+            mock.patch.object(conversation, "stream_image_outputs", fake_stream),
+        ):
+            with self.assertRaises(conversation.ImageGenerationCancelled):
+                conversation._generate_single_image(request, 1, 1)
+
+        self.assertEqual(accounts.releases, ["token-a"])
+        self.assertEqual(accounts.results, [])
 
 
 if __name__ == "__main__":

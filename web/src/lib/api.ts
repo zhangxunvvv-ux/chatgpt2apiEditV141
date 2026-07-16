@@ -611,7 +611,7 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   );
 }
 
-export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto") {
+export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto", batchSize = 1) {
   return httpRequest<ImageTask>("/api/image-tasks/generations", {
     method: "POST",
     body: {
@@ -620,6 +620,7 @@ export async function createImageGenerationTask(clientTaskId: string, prompt: st
       ...(model ? { model } : {}),
       ...(size ? { size } : {}),
       quality,
+      batch_size: batchSize,
     },
   });
 }
@@ -632,6 +633,7 @@ export async function createImageEditTask(
   size?: string,
   quality = "auto",
   masks: File[] = [],
+  batchSize = 1,
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -651,6 +653,7 @@ export async function createImageEditTask(
     formData.append("size", size);
   }
   formData.append("quality", quality);
+  formData.append("batch_size", String(batchSize));
 
   return httpRequest<ImageTask>("/api/image-tasks/edits", {
     method: "POST",

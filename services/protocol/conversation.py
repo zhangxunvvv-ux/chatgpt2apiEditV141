@@ -63,6 +63,10 @@ class ImageGenerationError(Exception):
         return error_dict
 
 
+class ImageGenerationCancelled(Exception):
+    """Internal cooperative cancellation for redundant or manually stopped tasks."""
+
+
 def public_image_error_message(message: str) -> str:
     text = str(message or "").strip()
     lower = text.lower()
@@ -312,6 +316,7 @@ class ConversationRequest:
     base_url: str | None = None
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
+    cancel_event: Any = None  # threading.Event-like object used by background image tasks
 
 
 @dataclass
@@ -1259,7 +1264,13 @@ def _generate_single_image(
     account_email = ""
     attempted_tokens: set[str] = set()
 
+    def cancelled() -> bool:
+        event = request.cancel_event
+        return bool(event is not None and callable(getattr(event, "is_set", None)) and event.is_set())
+
     while True:
+        if cancelled():
+            raise ImageGenerationCancelled("image generation cancelled")
         try:
             if request.progress_callback:
                 request.progress_callback("getting_account")
@@ -1290,6 +1301,10 @@ def _generate_single_image(
         backend = None
         slot_held = True
 
+        if cancelled():
+            account_service.release_image_slot(token)
+            raise ImageGenerationCancelled("image generation cancelled")
+
         def release_submission_slot() -> None:
             nonlocal slot_held
             if not slot_held:
@@ -1303,6 +1318,9 @@ def _generate_single_image(
                 # The upstream conversation is accepted. Polling may take minutes,
                 # so it must not keep the account submission slot occupied.
                 release_submission_slot()
+            if cancelled():
+                release_submission_slot()
+                raise ImageGenerationCancelled("image generation cancelled")
             if request.progress_callback:
                 request.progress_callback(event)
 
@@ -1352,6 +1370,9 @@ def _generate_single_image(
                 return outputs
             mark_result(True)
             return outputs
+        except ImageGenerationCancelled:
+            release_submission_slot()
+            raise
         except ImagePollTimeoutError as exc:
             mark_result(False, exc)
             if account_email:

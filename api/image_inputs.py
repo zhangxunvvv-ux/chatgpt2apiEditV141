@@ -60,6 +60,16 @@ def _parse_count(value: object) -> int:
     return count
 
 
+def _parse_batch_size(value: object) -> int:
+    try:
+        batch_size = int(value or 1)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail={"error": "batch_size must be an integer"}) from exc
+    if batch_size < 1 or batch_size > 10:
+        raise HTTPException(status_code=400, detail={"error": "batch_size must be between 1 and 10"})
+    return batch_size
+
+
 def _payload_from_fields(fields: dict[str, Any]) -> dict[str, Any]:
     """构造图片编辑载荷：从表单或 JSON 字段提取通用参数。"""
     prompt = _clean(fields.get("prompt"))
@@ -73,6 +83,7 @@ def _payload_from_fields(fields: dict[str, Any]) -> dict[str, Any]:
         "quality": _clean(fields.get("quality"), "auto"),
         "response_format": _clean(fields.get("response_format"), "b64_json"),
         "stream": _parse_bool(fields.get("stream")),
+        "batch_size": _parse_batch_size(fields.get("batch_size")),
     }
     if "client_task_id" in fields:
         payload["client_task_id"] = _clean(fields.get("client_task_id"))
@@ -183,7 +194,7 @@ async def parse_image_edit_request(request: Request) -> tuple[dict[str, Any], li
 
     form = await request.form()
     fields: dict[str, Any] = {}
-    for key in ("client_task_id", "prompt", "model", "n", "size", "quality", "response_format", "stream"):
+    for key in ("client_task_id", "prompt", "model", "n", "size", "quality", "response_format", "stream", "batch_size"):
         value = form.get(key)
         if isinstance(value, str):
             fields[key] = value

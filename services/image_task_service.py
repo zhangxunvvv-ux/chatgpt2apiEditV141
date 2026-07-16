@@ -22,6 +22,18 @@ TERMINAL_STATUSES = {TASK_STATUS_SUCCESS, TASK_STATUS_ERROR}
 UNFINISHED_STATUSES = {TASK_STATUS_QUEUED, TASK_STATUS_RUNNING}
 
 
+class _ImageTaskCancelled(Exception):
+    pass
+
+
+class _CombinedCancelEvent:
+    def __init__(self, *events: object):
+        self.events = tuple(event for event in events if event is not None)
+
+    def is_set(self) -> bool:
+        return any(callable(getattr(event, "is_set", None)) and event.is_set() for event in self.events)
+
+
 def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -119,6 +131,8 @@ class ImageTaskService:
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
+        self._workers: dict[str, threading.Thread] = {}
+        self._cancel_events: dict[str, threading.Event] = {}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             self._tasks = self._load_locked()
@@ -137,6 +151,7 @@ class ImageTaskService:
         size: str | None,
         quality: str = "auto",
         base_url: str = "",
+        batch_size: int = 1,
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
@@ -146,6 +161,7 @@ class ImageTaskService:
             "quality": quality,
             "response_format": "url",
             "base_url": base_url,
+            "_batch_size": max(1, int(batch_size or 1)),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="generate", payload=payload)
 
@@ -161,6 +177,7 @@ class ImageTaskService:
         base_url: str = "",
         images: list[tuple[bytes, str, str]] | None = None,
         masks: list[tuple[bytes, str, str]] | None = None,
+        batch_size: int = 1,
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
@@ -172,6 +189,7 @@ class ImageTaskService:
             "quality": quality,
             "response_format": "url",
             "base_url": base_url,
+            "_batch_size": max(1, int(batch_size or 1)),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload)
 
@@ -210,6 +228,9 @@ class ImageTaskService:
                 raise ValueError("task not found")
             if task.get("status") in TERMINAL_STATUSES:
                 return _public_task(task)
+            cancel_event = self._cancel_events.get(key)
+            if cancel_event is not None:
+                cancel_event.set()
             now_ts = time.time()
             base_ts = task.get("started_ts") or task.get("created_ts") or task.get("updated_ts") or now_ts
             try:
@@ -264,15 +285,22 @@ class ImageTaskService:
             should_start = True
 
         if should_start:
+            cancel_event = threading.Event()
             thread = threading.Thread(
                 target=self._run_task,
-                args=(key, mode, payload, dict(identity), _clean(payload.get("model"), "gpt-image-2")),
+                args=(key, mode, payload, dict(identity), _clean(payload.get("model"), "gpt-image-2"), cancel_event),
                 name=f"image-task-{task_id[:16]}",
                 daemon=True,
             )
+            with self._lock:
+                self._workers[key] = thread
+                self._cancel_events[key] = cancel_event
             try:
                 thread.start()
             except Exception as exc:
+                with self._lock:
+                    self._workers.pop(key, None)
+                    self._cancel_events.pop(key, None)
                 self._update_task(
                     key,
                     status=TASK_STATUS_ERROR,
@@ -280,18 +308,6 @@ class ImageTaskService:
                 )
                 raise
         return _public_task(task)
-
-    @staticmethod
-    def _merge_usage(target: dict[str, Any], source: object) -> None:
-        if not isinstance(source, dict):
-            return
-        usage = target.setdefault("usage", {})
-        if not isinstance(usage, dict):
-            usage = {}
-            target["usage"] = usage
-        for key, value in source.items():
-            if isinstance(value, (int, float)):
-                usage[key] = usage.get(key, 0) + value
 
     def _run_redundant_handler(
         self,
@@ -301,20 +317,38 @@ class ImageTaskService:
     ) -> dict[str, Any]:
         copies = config.image_redundant_copies if config.image_redundant_generation_enabled else 1
         attempts = config.image_redundant_max_attempts if config.image_redundant_generation_enabled else 1
+        # A batch already has one independent worker per requested image. Running
+        # redundant copies as well would multiply a batch of 10 into 20+ calls.
+        if int(payload.get("_batch_size") or 1) > 1:
+            copies = 1
+            attempts = 1
         copies = max(1, copies)
         attempts = max(1, attempts)
         if copies == 1 and attempts == 1:
             return handler(dict(payload))
 
+        task_cancel_event = payload.get("cancel_event")
         last_errors: list[str] = []
         for attempt in range(1, attempts + 1):
+            if _CombinedCancelEvent(task_cancel_event).is_set():
+                raise _ImageTaskCancelled("image task cancelled")
             self._update_task(key, progress=f"redundant_attempt_{attempt}")
-            successes: list[dict[str, Any]] = []
-            with ThreadPoolExecutor(max_workers=copies, thread_name_prefix=f"image-redundant-{attempt}") as executor:
-                futures = [executor.submit(handler, dict(payload)) for _ in range(copies)]
+            round_cancel_event = threading.Event()
+            executor = ThreadPoolExecutor(max_workers=copies, thread_name_prefix=f"image-redundant-{attempt}")
+            futures = []
+            detached = False
+            try:
+                for _ in range(copies):
+                    attempt_payload = dict(payload)
+                    attempt_payload["cancel_event"] = _CombinedCancelEvent(task_cancel_event, round_cancel_event)
+                    futures.append(executor.submit(handler, attempt_payload))
                 for future in as_completed(futures):
                     try:
                         result = future.result()
+                    except _ImageTaskCancelled:
+                        if _CombinedCancelEvent(task_cancel_event).is_set():
+                            raise
+                        continue
                     except Exception as exc:
                         last_errors.append(str(exc) or exc.__class__.__name__)
                         continue
@@ -323,35 +357,20 @@ class ImageTaskService:
                         continue
                     data = result.get("data")
                     if isinstance(data, list) and data:
-                        successes.append(result)
-                        continue
+                        # First successful copy wins. Signal running losers to stop,
+                        # cancel copies that have not started, and return immediately.
+                        round_cancel_event.set()
+                        for pending in futures:
+                            if pending is not future:
+                                pending.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        detached = True
+                        return result
                     message = _clean(result.get("message"), "image generation failed")
                     last_errors.append(message)
-
-            if successes:
-                merged: dict[str, Any] = {
-                    "created": int(time.time()),
-                    "data": [],
-                }
-                account_emails: list[str] = []
-                conversation_ids: list[str] = []
-                for result in successes:
-                    data = result.get("data")
-                    if isinstance(data, list):
-                        merged["data"].extend(data)
-                    email = _clean(result.get("_account_email") or result.get("account_email"))
-                    if email:
-                        account_emails.append(email)
-                    conv_id = _clean(result.get("_conversation_id") or result.get("conversation_id"))
-                    if conv_id:
-                        conversation_ids.append(conv_id)
-                    self._merge_usage(merged, result.get("usage"))
-                if account_emails:
-                    merged["_account_email"] = ",".join(dict.fromkeys(account_emails))
-                if conversation_ids:
-                    merged["_conversation_id"] = conversation_ids[0]
-                    merged["_conversation_ids"] = list(dict.fromkeys(conversation_ids))
-                return merged
+            finally:
+                if not detached:
+                    executor.shutdown(wait=True, cancel_futures=True)
 
         message = "；".join(error for error in last_errors[-5:] if error) or "image generation failed"
         raise RuntimeError(message)
@@ -363,11 +382,14 @@ class ImageTaskService:
         payload: dict[str, Any],
         identity: dict[str, object],
         model: str,
+        cancel_event: threading.Event,
     ) -> None:
         started = time.time()
         self._update_task(key, status=TASK_STATUS_RUNNING, error="")
         # 创建进度回调，每个步骤完成后更新任务状态
         def progress_callback(event: Any) -> None:
+            if cancel_event.is_set():
+                raise _ImageTaskCancelled("image task cancelled")
             step = ""
             conversation_id = ""
             if isinstance(event, dict):
@@ -382,10 +404,18 @@ class ImageTaskService:
                 updates["conversation_id"] = conversation_id
             self._update_task(key, **updates)
         # 将进度回调添加到 payload 中（handler 会提取并传递给 ConversationRequest）
-        payload_with_progress = {**payload, "progress_callback": progress_callback}
+        payload_with_progress = {
+            **payload,
+            "progress_callback": progress_callback,
+            "cancel_event": cancel_event,
+        }
         try:
+            if cancel_event.is_set():
+                raise _ImageTaskCancelled("image task cancelled")
             handler = self.edit_handler if mode == "edit" else self.generation_handler
             result = self._run_redundant_handler(handler, payload_with_progress, key)
+            if cancel_event.is_set():
+                raise _ImageTaskCancelled("image task cancelled")
             if not isinstance(result, dict):
                 raise RuntimeError("image task returned streaming result unexpectedly")
             data = result.get("data")
@@ -422,7 +452,11 @@ class ImageTaskService:
                 urls=_collect_image_urls(data),
                 account_email=account_email,
             )
+        except _ImageTaskCancelled:
+            return
         except Exception as exc:
+            if cancel_event.is_set():
+                return
             error_message = str(exc) or "image task failed"
             account_email = _clean(getattr(exc, "account_email", ""))
             conversation_id = _clean(getattr(exc, "conversation_id", ""))
@@ -441,6 +475,13 @@ class ImageTaskService:
                 error=error_message,
                 account_email=account_email,
             )
+        finally:
+            current_thread = threading.current_thread()
+            with self._lock:
+                if self._workers.get(key) is current_thread:
+                    self._workers.pop(key, None)
+                if self._cancel_events.get(key) is cancel_event:
+                    self._cancel_events.pop(key, None)
 
     def _log_call(
         self,
@@ -590,10 +631,16 @@ class ImageTaskService:
             timeout_secs = 100.0
         now = time.time()
         changed = False
-        for task in self._tasks.values():
+        for key, task in self._tasks.items():
             if task.get("status") not in UNFINISHED_STATUSES:
                 continue
-            base_ts = task.get("created_ts") or task.get("started_ts") or task.get("updated_ts")
+            worker = self._workers.get(key)
+            if worker is not None and worker.is_alive():
+                # The handler owns its per-attempt 100-second polling window.
+                # Do not turn a live task into a terminal error and discard a
+                # success that arrives moments later.
+                continue
+            base_ts = task.get("started_ts") or task.get("created_ts") or task.get("updated_ts")
             if not isinstance(base_ts, (int, float)):
                 continue
             if now - float(base_ts) < timeout_secs:
