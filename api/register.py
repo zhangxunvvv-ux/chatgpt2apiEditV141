@@ -40,9 +40,10 @@ def create_router() -> APIRouter:
         return {"register": register_service.update(body.model_dump(exclude_none=True))}
 
     @router.post("/api/register/start")
-    async def start_register(authorization: str | None = Header(default=None)):
+    async def start_register(body: RegisterConfigRequest | None = None, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"register": register_service.start()}
+        updates = body.model_dump(exclude_none=True) if body is not None else None
+        return {"register": register_service.start(updates)}
 
     @router.post("/api/register/stop")
     async def stop_register(authorization: str | None = Header(default=None)):

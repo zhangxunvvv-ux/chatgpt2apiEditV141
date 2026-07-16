@@ -781,7 +781,7 @@ class PlatformRegistrar:
         step(index, "发送验证码完成")
 
     def _validate_otp(self, code: str, index: int) -> None:
-        step(index, f"开始校验验证码 {code}")
+        step(index, "开始校验验证码")
         resp, error = validate_otp(self.session, self.device_id, code)
         if resp is None or resp.status_code != 200:
             body = ""
@@ -803,8 +803,9 @@ class PlatformRegistrar:
                     raise RuntimeError(last_detail or "等待注册验证码超时")
                 step(index, f"第 {attempt}/{max_attempts} 次等待未收到验证码，继续等待", "yellow")
                 continue
-            step(index, f"收到注册验证码: {code}")
-            step(index, f"开始校验验证码 {code}")
+            mail_provider.mark_verification_code_received(mailbox)
+            step(index, "收到注册验证码")
+            step(index, "开始校验验证码")
             resp, error = validate_otp(self.session, self.device_id, code)
             if resp is not None and resp.status_code == 200:
                 step(index, "验证码校验完成")

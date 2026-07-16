@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest import mock
 
 from services.register import mail_provider
@@ -201,6 +203,143 @@ class TempMailLolProviderTests(unittest.TestCase):
                 {"Authorization": "Bearer fallback-key"},
             ],
         )
+
+    def test_poll_rechecks_message_when_body_arrives_later(self) -> None:
+        entry = {"provider_ref": "tempmail-recheck", "api_key": "key", "domain": []}
+        session = FakeSession(
+            [
+                FakeResponse(200, {"emails": [{"id": "same-message", "subject": "OpenAI", "body": ""}]}),
+                FakeResponse(
+                    200,
+                    {"emails": [{"id": "same-message", "subject": "OpenAI", "body": "Your ChatGPT code is 654321"}]},
+                ),
+            ]
+        )
+        provider = self.make_provider(entry, session)
+        mailbox = {"address": "mail@example.com", "token": "token-recheck"}
+
+        with mock.patch.object(mail_provider.time, "sleep", return_value=None):
+            code = provider.wait_for_code(mailbox)
+
+        self.assertEqual(code, "654321")
+        self.assertEqual(len(session.requests), 2)
+
+    def test_poll_accepts_unseen_message_id_despite_clock_skew(self) -> None:
+        entry = {"provider_ref": "tempmail-clock-skew", "api_key": "key", "domain": []}
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {
+                        "emails": [
+                            {
+                                "id": "new-message",
+                                "subject": "Verification code: 321654",
+                                "created_at": "2020-01-01T00:00:00Z",
+                            }
+                        ]
+                    },
+                )
+            ]
+        )
+        provider = self.make_provider(entry, session)
+        mailbox = {
+            "address": "mail@example.com",
+            "token": "token-clock-skew",
+            "_code_not_before": datetime.now(timezone.utc),
+        }
+
+        self.assertEqual(provider.wait_for_code(mailbox), "321654")
+
+    def test_poll_429_pauses_key_until_window_reset_without_leaking_secrets(self) -> None:
+        entry = {
+            "provider_ref": "tempmail-poll-429",
+            "api_key": "api-secret",
+            "domain": [],
+            "window_seconds": 300,
+        }
+        session = FakeSession([FakeResponse(429, {"error": "rate limited"}, "rate limited")])
+        provider = self.make_provider(entry, session)
+        mailbox = {"address": "mail@example.com", "token": "token-secret"}
+        clock = [0.0]
+        sleeps: list[float] = []
+        logs: list[str] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        mail_provider.provider_log_sink = logs.append
+        try:
+            with mock.patch.object(mail_provider.time, "monotonic", side_effect=lambda: clock[0]), mock.patch.object(
+                mail_provider.time, "sleep", side_effect=fake_sleep
+            ):
+                self.assertIsNone(provider.wait_for_code(mailbox))
+        finally:
+            mail_provider.provider_log_sink = None
+
+        self.assertEqual(len(session.requests), 1)
+        self.assertEqual(sleeps, [2.0])
+        summary = "\n".join(logs)
+        self.assertIn("http_429=1", summary)
+        self.assertIn("cooldown_pauses=1", summary)
+        self.assertNotIn("api-secret", summary)
+        self.assertNotIn("token-secret", summary)
+
+    def test_cooled_domain_is_skipped_and_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            mail_provider, "TEMPMAIL_DOMAIN_STATS_FILE", Path(temp_dir) / "domain-stats.json"
+        ):
+            for _ in range(3):
+                mail_provider._record_tempmail_domain_result(
+                    "abc.airfryersbg.com",
+                    received=False,
+                    cooldown_threshold=3,
+                    cooldown_seconds=600,
+                )
+            session = FakeSession(
+                [
+                    FakeResponse(201, {"address": "bad@next.airfryersbg.com", "token": "discarded-token"}),
+                    FakeResponse(201, {"address": "good@tal.gardianwaves.org", "token": "accepted-token"}),
+                ]
+            )
+            provider = self.make_provider(
+                {
+                    "provider_ref": "tempmail-domain-cooldown",
+                    "api_key": "key",
+                    "domain": [],
+                    "max_wait": 0,
+                    "domain_cooldown_threshold": 3,
+                    "domain_cooldown_seconds": 600,
+                },
+                session,
+            )
+
+            mailbox = provider.create_mailbox()
+            stats = {item["domain"]: item for item in mail_provider.tempmail_domain_stats_snapshot()}
+
+        self.assertEqual(mailbox["address"], "good@tal.gardianwaves.org")
+        self.assertEqual(len(session.requests), 2)
+        self.assertTrue(stats["airfryersbg.com"]["cooling"])
+        self.assertEqual(stats["airfryersbg.com"]["skipped"], 1)
+
+    def test_delivery_result_is_recorded_only_once_per_mailbox(self) -> None:
+        mailbox = {
+            "provider": "tempmail_lol",
+            "address": "mail@tal.gardianwaves.org",
+            "_domain_cooldown_threshold": 3,
+            "_domain_cooldown_seconds": 600,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            mail_provider, "TEMPMAIL_DOMAIN_STATS_FILE", Path(temp_dir) / "domain-stats.json"
+        ):
+            mail_provider.mark_verification_code_received(mailbox)
+            mail_provider.mark_verification_code_received(mailbox)
+            mail_provider.mark_mailbox_result(mailbox, success=False, error="等待注册验证码超时")
+            stats = {item["domain"]: item for item in mail_provider.tempmail_domain_stats_snapshot()}
+
+        self.assertEqual(stats["gardianwaves.org"]["received"], 1)
+        self.assertEqual(stats["gardianwaves.org"]["timeouts"], 0)
 
 
 if __name__ == "__main__":

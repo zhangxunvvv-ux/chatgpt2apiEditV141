@@ -381,11 +381,29 @@ def _message_matches_email(data: dict[str, Any], email: str) -> bool:
 
 def _extract_code(message: dict[str, Any]) -> str | None:
     content = f"{message.get('subject', '')}\n{message.get('text_content', '')}\n{message.get('html_content', '')}".strip()
+    raw = message.get("raw")
+    if raw:
+        try:
+            raw_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
+        except Exception:
+            raw_text = str(raw)
+        if raw_text not in content:
+            content = f"{content}\n{raw_text}".strip()
     if not content:
         return None
     match = re.search(r"background-color:\s*#F3F3F3[^>]*>[\s\S]*?(\d{6})[\s\S]*?</p>", content, re.I)
     if match:
         return match.group(1)
+    contextual_patterns = (
+        r"(?:verification|security|login|sign[ -]?in|one[ -]?time|chatgpt|otp|code|\u9a8c\u8bc1\u7801|\u6821\u9a8c\u7801)[^0-9]{0,100}((?:\d[\s-]?){6})",
+        r"((?:\d[\s-]?){6})[^A-Za-z0-9]{0,80}(?:is\s+(?:your\s+)?(?:verification\s+)?code|\u9a8c\u8bc1\u7801)",
+    )
+    for pattern in contextual_patterns:
+        match = re.search(pattern, content, re.I)
+        if match:
+            value = re.sub(r"\D", "", match.group(1))
+            if len(value) == 6 and value != "177010":
+                return value
     match = re.search(r"(?:Verification code|code is|代码为|验证码)[:\s]*(\d{6})", content, re.I)
     if match and match.group(1) != "177010":
         return match.group(1)
@@ -976,6 +994,169 @@ TEMPMAIL_LOL_API_BASE = "https://api.tempmail.lol/v2"
 _TEMPMAIL_KEY_SPLIT_RE = re.compile(r"[\s,，;；]+")
 _TEMPMAIL_DOMAIN_SPLIT_RE = re.compile(r"[\s,，;；]+")
 _TEMPMAIL_TRANSIENT_STATUSES = {500, 502, 503, 504, 520, 521, 522, 523, 524}
+TEMPMAIL_DOMAIN_STATS_FILE = DATA_DIR / "tempmail_domain_stats.json"
+_tempmail_domain_stats_lock = Lock()
+
+
+def _tempmail_root_domain(address_or_domain: str) -> str:
+    source = str(address_or_domain or "").strip().lower()
+    domain = source.partition("@")[2] or source
+    labels = [part for part in domain.strip(".").split(".") if part]
+    if len(labels) < 2:
+        return domain.strip(".")
+    compound_suffixes = {"co.uk", "com.cn", "net.cn", "org.cn", "com.au", "co.jp"}
+    suffix = ".".join(labels[-2:])
+    return ".".join(labels[-3:]) if suffix in compound_suffixes and len(labels) >= 3 else suffix
+
+
+def _load_tempmail_domain_stats() -> dict[str, dict[str, Any]]:
+    try:
+        data = json.loads(TEMPMAIL_DOMAIN_STATS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): dict(value) for key, value in data.items() if isinstance(value, dict)}
+
+
+def _save_tempmail_domain_stats(stats: dict[str, dict[str, Any]]) -> None:
+    TEMPMAIL_DOMAIN_STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = TEMPMAIL_DOMAIN_STATS_FILE.with_suffix(".tmp")
+    temp_file.write_text(json.dumps(stats, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp_file.replace(TEMPMAIL_DOMAIN_STATS_FILE)
+
+
+def _tempmail_cooldown_until(entry: dict[str, Any]) -> datetime | None:
+    try:
+        value = datetime.fromisoformat(str(entry.get("cooldown_until") or ""))
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _tempmail_domain_cooldown_remaining(domain: str) -> float:
+    root = _tempmail_root_domain(domain)
+    if not root:
+        return 0.0
+    with _tempmail_domain_stats_lock:
+        stats = _load_tempmail_domain_stats()
+        entry = stats.get(root)
+        if not isinstance(entry, dict):
+            return 0.0
+        until = _tempmail_cooldown_until(entry)
+        if until is None:
+            return 0.0
+        remaining = (until - datetime.now(timezone.utc)).total_seconds()
+        if remaining > 0:
+            return remaining
+        entry["cooldown_until"] = ""
+        entry["consecutive_timeouts"] = 0
+        entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _save_tempmail_domain_stats(stats)
+        return 0.0
+
+
+def _record_tempmail_domain_result(
+    domain: str,
+    *,
+    received: bool,
+    cooldown_threshold: int,
+    cooldown_seconds: float,
+) -> None:
+    root = _tempmail_root_domain(domain)
+    if not root:
+        return
+    now = datetime.now(timezone.utc)
+    entered_cooldown = False
+    with _tempmail_domain_stats_lock:
+        stats = _load_tempmail_domain_stats()
+        entry = stats.setdefault(root, {})
+        entry["received"] = int(entry.get("received") or 0)
+        entry["timeouts"] = int(entry.get("timeouts") or 0)
+        entry["skipped"] = int(entry.get("skipped") or 0)
+        entry["consecutive_timeouts"] = int(entry.get("consecutive_timeouts") or 0)
+        if received:
+            entry["received"] += 1
+            entry["consecutive_timeouts"] = 0
+            entry["cooldown_until"] = ""
+        else:
+            entry["timeouts"] += 1
+            entry["consecutive_timeouts"] += 1
+            if entry["consecutive_timeouts"] >= max(1, cooldown_threshold):
+                entry["cooldown_until"] = (now + timedelta(seconds=max(60.0, cooldown_seconds))).isoformat()
+                entered_cooldown = True
+        entry["updated_at"] = now.isoformat()
+        _save_tempmail_domain_stats(stats)
+        consecutive_timeouts = entry["consecutive_timeouts"]
+    if entered_cooldown:
+        _provider_log(
+            f"TempMail.lol 域名进入冷却: domain={root}, consecutive_timeouts={consecutive_timeouts}, "
+            f"cooldown_seconds={max(60.0, cooldown_seconds):.0f}"
+        )
+
+
+def _record_tempmail_domain_skip(domain: str) -> None:
+    root = _tempmail_root_domain(domain)
+    if not root:
+        return
+    with _tempmail_domain_stats_lock:
+        stats = _load_tempmail_domain_stats()
+        entry = stats.setdefault(root, {})
+        entry["received"] = int(entry.get("received") or 0)
+        entry["timeouts"] = int(entry.get("timeouts") or 0)
+        entry["consecutive_timeouts"] = int(entry.get("consecutive_timeouts") or 0)
+        entry["skipped"] = int(entry.get("skipped") or 0) + 1
+        entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _save_tempmail_domain_stats(stats)
+
+
+def tempmail_domain_stats_snapshot() -> list[dict[str, Any]]:
+    with _tempmail_domain_stats_lock:
+        stats = _load_tempmail_domain_stats()
+    now = datetime.now(timezone.utc)
+    result: list[dict[str, Any]] = []
+    for domain, entry in stats.items():
+        received = int(entry.get("received") or 0)
+        timeouts = int(entry.get("timeouts") or 0)
+        until = _tempmail_cooldown_until(entry)
+        remaining = max(0.0, (until - now).total_seconds()) if until is not None else 0.0
+        result.append(
+            {
+                "domain": domain,
+                "received": received,
+                "timeouts": timeouts,
+                "success_rate": round(received * 100 / max(1, received + timeouts), 1),
+                "consecutive_timeouts": int(entry.get("consecutive_timeouts") or 0),
+                "skipped": int(entry.get("skipped") or 0),
+                "cooling": remaining > 0,
+                "cooldown_remaining_seconds": round(remaining),
+            }
+        )
+    return sorted(result, key=lambda item: (-int(item["cooling"]), float(item["success_rate"]), str(item["domain"])))
+
+
+def mark_verification_code_received(mailbox: dict[str, Any]) -> None:
+    if str(mailbox.get("provider") or "") != "tempmail_lol" or mailbox.get("_domain_delivery_recorded"):
+        return
+    _record_tempmail_domain_result(
+        str(mailbox.get("address") or ""),
+        received=True,
+        cooldown_threshold=int(mailbox.get("_domain_cooldown_threshold") or 3),
+        cooldown_seconds=float(mailbox.get("_domain_cooldown_seconds") or 21600),
+    )
+    mailbox["_domain_delivery_recorded"] = True
+
+
+def _mark_tempmail_verification_timeout(mailbox: dict[str, Any]) -> None:
+    if str(mailbox.get("provider") or "") != "tempmail_lol" or mailbox.get("_domain_delivery_recorded"):
+        return
+    _record_tempmail_domain_result(
+        str(mailbox.get("address") or ""),
+        received=False,
+        cooldown_threshold=int(mailbox.get("_domain_cooldown_threshold") or 3),
+        cooldown_seconds=float(mailbox.get("_domain_cooldown_seconds") or 21600),
+    )
+    mailbox["_domain_delivery_recorded"] = True
 
 
 def _parse_tempmail_keys(raw: Any) -> list[str]:
@@ -1062,6 +1243,7 @@ class _TempMailKeyPool:
         self.window = max(10.0, window)
         self._lock = Lock()
         self._usage = {key: deque() for key in self.keys}
+        self._rate_limited_until = {key: 0.0 for key in self.keys}
         self._cursor = 0
 
     def _trim_locked(self, key: str, now: float) -> None:
@@ -1100,6 +1282,20 @@ class _TempMailKeyPool:
             usage = self._usage.setdefault(key, deque())
             usage.clear()
             usage.extend(now for _ in range(self.rate))
+            self._rate_limited_until[key] = now + self.window
+
+    def cooldown_remaining(self, key: str) -> float:
+        with self._lock:
+            return max(0.0, float(self._rate_limited_until.get(key) or 0.0) - time.monotonic())
+
+    def available_key(self, *, exclude: set[str] | None = None) -> str | None:
+        excluded = exclude or set()
+        with self._lock:
+            now = time.monotonic()
+            for key in self.keys:
+                if key not in excluded and float(self._rate_limited_until.get(key) or 0.0) <= now:
+                    return key
+        return None
 
 
 _tempmail_pool_lock = Lock()
@@ -1167,7 +1363,10 @@ class TempMailLolProvider(BaseMailProvider):
         self.window_seconds = max(10.0, _tempmail_float(entry.get("window_seconds", entry.get("tempmail_window_seconds", 300)), 300))
         self.max_wait = max(0.0, _tempmail_float(entry.get("max_wait", entry.get("tempmail_max_wait", 600)), 600))
         self.create_total_budget = max(15.0, _tempmail_float(entry.get("create_total_budget", entry.get("tempmail_create_total_budget", 90)), 90))
+        self.domain_cooldown_threshold = max(1, _tempmail_int(entry.get("domain_cooldown_threshold", 3), 3))
+        self.domain_cooldown_seconds = max(60.0, _tempmail_float(entry.get("domain_cooldown_seconds", 21600), 21600))
         self.key_pool = _get_tempmail_pool(self.provider_ref, self.api_keys, self.rate_per_window, self.window_seconds)
+        self._last_status_code: int | None = None
         self.session = _create_session(conf)
         self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/json", "Content-Type": "application/json"})
 
@@ -1193,9 +1392,10 @@ class TempMailLolProvider(BaseMailProvider):
             )
         except Exception as error:
             raise _TempMailLolRequestError(f"TempMail.lol 请求失败: {method} {path}, {error}") from error
+        self._last_status_code = int(resp.status_code)
         if resp.status_code not in expected:
             raise _TempMailLolRequestError(
-                f"TempMail.lol 请求失败: {method} {path}, HTTP {resp.status_code}, body={str(resp.text or '')[:300]}",
+                f"TempMail.lol 请求失败: {method} {path}, HTTP {resp.status_code}",
                 status_code=resp.status_code,
             )
         try:
@@ -1254,10 +1454,27 @@ class TempMailLolProvider(BaseMailProvider):
             address = str(data.get("address") or "").strip()
             token = str(data.get("token") or "").strip()
             if not address or not token:
-                last_error = RuntimeError(f"TempMail.lol 响应缺少 address/token: {data}")
+                last_error = RuntimeError("TempMail.lol 响应缺少 address/token")
+                continue
+            cooldown_remaining = _tempmail_domain_cooldown_remaining(address)
+            if cooldown_remaining > 0:
+                root_domain = _tempmail_root_domain(address)
+                _record_tempmail_domain_skip(root_domain)
+                _provider_log(
+                    f"TempMail.lol 跳过冷却域名: domain={root_domain}, "
+                    f"cooldown_remaining_seconds={cooldown_remaining:.0f}"
+                )
+                last_error = RuntimeError(f"TempMail.lol 域名正在冷却: {root_domain}")
                 continue
             _remember_tempmail_token_key(token, api_key)
-            return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "token": token}
+            return {
+                "provider": self.name,
+                "provider_ref": self.provider_ref,
+                "address": address,
+                "token": token,
+                "_domain_cooldown_threshold": self.domain_cooldown_threshold,
+                "_domain_cooldown_seconds": self.domain_cooldown_seconds,
+            }
 
         raise RuntimeError(
             f"TempMail.lol 创建邮箱多次失败 ({max_attempts} 次尝试，最后状态={last_status}): {last_error}"
@@ -1313,8 +1530,43 @@ class TempMailLolProvider(BaseMailProvider):
         api_key = primary_key
         consecutive_errors = 0
         deadline = time.monotonic() + self.conf["wait_timeout"]
+        successful_queries = 0
+        empty_inboxes = 0
+        http_429 = 0
+        http_5xx = 0
+        other_errors = 0
+        scanned = 0
+        boundary_filtered = 0
+        no_code = 0
+        cooldown_pauses = 0
+        key_switches = 0
+        last_batch = 0
+        last_status: int | None = None
+
+        def log_diagnostics(outcome: str) -> None:
+            domain = _tempmail_root_domain(str(mailbox.get("address") or "")) or "unknown"
+            _provider_log(
+                f"TempMail.lol 验证码轮询{outcome}: domain={domain}, "
+                f"successful_queries={successful_queries}, empty_inboxes={empty_inboxes}, "
+                f"http_429={http_429}, http_5xx={http_5xx}, other_errors={other_errors}, "
+                f"last_status={last_status if last_status is not None else 'none'}, last_batch={last_batch}, "
+                f"scanned={scanned}, no_code={no_code}, boundary_filtered={boundary_filtered}, "
+                f"cooldown_pauses={cooldown_pauses}, key_switches={key_switches}"
+            )
 
         while time.monotonic() < deadline:
+            cooldown_remaining = self.key_pool.cooldown_remaining(api_key)
+            if cooldown_remaining > 0:
+                fallback = self.key_pool.available_key(exclude={api_key})
+                if fallback is not None:
+                    api_key = fallback
+                    key_switches += 1
+                    continue
+                pause = min(cooldown_remaining, max(0.0, deadline - time.monotonic()))
+                if pause > 0:
+                    cooldown_pauses += 1
+                    time.sleep(pause)
+                continue
             try:
                 data = self._request(
                     "GET",
@@ -1322,17 +1574,41 @@ class TempMailLolProvider(BaseMailProvider):
                     api_key=api_key,
                     params={"token": mailbox["token"]},
                 )
+                last_status = self._last_status_code
+                successful_queries += 1
                 consecutive_errors = 0
-            except Exception:
+            except _TempMailLolRequestError as error:
+                last_status = error.status_code
                 consecutive_errors += 1
-                if consecutive_errors == 3:
-                    fallback = next((key for key in self.api_keys if key and key != primary_key), None)
+                if error.status_code == 429:
+                    http_429 += 1
+                    self.key_pool.mark_rate_limited(api_key)
+                    fallback = self.key_pool.available_key(exclude={api_key})
                     if fallback is not None:
                         api_key = fallback
+                        key_switches += 1
+                    continue
+                if error.status_code is not None and 500 <= error.status_code < 600:
+                    http_5xx += 1
+                else:
+                    other_errors += 1
+                if consecutive_errors == 3:
+                    fallback = self.key_pool.available_key(exclude={primary_key})
+                    if fallback is not None:
+                        api_key = fallback
+                        key_switches += 1
+                time.sleep(max(0.2, self.conf["wait_interval"]))
+                continue
+            except Exception:
+                other_errors += 1
+                consecutive_errors += 1
                 time.sleep(max(0.2, self.conf["wait_interval"]))
                 continue
 
             messages = [self._message_from_item(mailbox, item) for item in self._inbox_items(data)]
+            last_batch = len(messages)
+            if not messages:
+                empty_inboxes += 1
             messages.sort(
                 key=lambda message: (
                     (message.get("received_at") or datetime.fromtimestamp(0, tz=timezone.utc)).timestamp(),
@@ -1341,17 +1617,26 @@ class TempMailLolProvider(BaseMailProvider):
                 reverse=True,
             )
             for message in messages:
-                if _message_before_code_boundary(mailbox, message):
+                if _message_before_code_boundary(mailbox, message) and not message.get("message_id"):
+                    boundary_filtered += 1
                     continue
                 ref = _message_tracking_ref(message)
                 if ref in seen_refs:
                     continue
-                seen_refs.add(ref)
-                seen_value.append(ref)
+                scanned += 1
                 code = _extract_code(message)
                 if code and not _verification_code_rejected(mailbox, code):
+                    seen_refs.add(ref)
+                    seen_value.append(ref)
+                    log_diagnostics("命中")
                     return code
+                if code:
+                    seen_refs.add(ref)
+                    seen_value.append(ref)
+                else:
+                    no_code += 1
             time.sleep(max(0.2, self.conf["wait_interval"]))
+        log_diagnostics("超时")
         return None
 
     def close(self) -> None:
@@ -2098,6 +2383,8 @@ def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str 
     reason = str(error or "").strip()
     if not success and _is_account_creation_rate_limit(error):
         mark_mailbox_rate_limited(mailbox, reason="OpenAI user_register account_creation_failed")
+    if not success and "等待注册验证码超时" in reason:
+        _mark_tempmail_verification_timeout(mailbox)
     if str(mailbox.get("provider") or "") != OutlookTokenProvider.name:
         return
     address = str(mailbox.get("address") or "").strip()

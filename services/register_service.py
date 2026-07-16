@@ -68,6 +68,11 @@ def _normalize(raw: dict) -> dict:
     cfg["mail"] = {**default_mail, **mail}
     cfg["mail"]["api_use_register_proxy"] = _safe_bool(cfg["mail"].get("api_use_register_proxy"), False)
     cfg["mail"].pop("proxy", None)
+    providers = cfg["mail"].get("providers")
+    if isinstance(providers, list):
+        for provider in providers:
+            if isinstance(provider, dict):
+                provider.pop("domain_stats", None)
     cfg["enabled"] = bool(cfg.get("enabled"))
     stats = {**_default_config()["stats"], **(raw.get("stats") if isinstance(raw.get("stats"), dict) else {}),
              "threads": cfg["threads"]}
@@ -100,7 +105,18 @@ class RegisterService:
         with self._lock:
             snapshot = json.loads(json.dumps({**self._config, "logs": self._logs[-300:]}, ensure_ascii=False))
         self._redact_outlook_pools(snapshot)
+        self._attach_tempmail_domain_stats(snapshot)
         return snapshot
+
+    @staticmethod
+    def _attach_tempmail_domain_stats(snapshot: dict) -> None:
+        mail = snapshot.get("mail")
+        if not isinstance(mail, dict) or not isinstance(mail.get("providers"), list):
+            return
+        stats = mail_provider.tempmail_domain_stats_snapshot()
+        for provider in mail["providers"]:
+            if isinstance(provider, dict) and provider.get("type") == "tempmail_lol":
+                provider["domain_stats"] = stats
 
     @staticmethod
     def _mask_email(email: str) -> str:
@@ -175,21 +191,26 @@ class RegisterService:
                 provider.pop(key, None)
         return total_removed
 
+    def _apply_updates_locked(self, updates: dict) -> None:
+        self._merge_outlook_pools(updates)
+        self._config = _normalize({**self._config, **updates})
+        self._drop_mail_proxy()
+        openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
+
     def update(self, updates: dict) -> dict:
         with self._lock:
-            self._merge_outlook_pools(updates)
-            self._config = _normalize({**self._config, **updates})
-            self._drop_mail_proxy()
-            openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
+            self._apply_updates_locked(updates)
             self._save()
             return self.get()
 
-    def start(self) -> dict:
+    def start(self, updates: dict | None = None) -> dict:
         with self._lock:
             if self._runner and self._runner.is_alive():
                 self._config["enabled"] = True
                 self._save()
                 return self.get()
+            if updates:
+                self._apply_updates_locked(updates)
             self._config["enabled"] = True
             self._drop_mail_proxy()
             self._logs = []

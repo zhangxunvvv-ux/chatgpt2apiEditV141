@@ -61,7 +61,7 @@ export function RegisterCard() {
       enable: true,
       ...(type === "cloudmail_gen" ? { api_base: "", admin_email: "", admin_password: "", domain: [], subdomain: [], email_prefix: "" } : {}),
       ...(type === "cloudflare_temp_email" ? { api_base: "", admin_password: "", domain: [] } : {}),
-      ...(type === "tempmail_lol" ? { api_key: "", domain: [], rate_per_window: 24, window_seconds: 300, max_wait: 600, create_total_budget: 90 } : {}),
+      ...(type === "tempmail_lol" ? { api_key: "", domain: [], rate_per_window: 24, window_seconds: 300, max_wait: 600, create_total_budget: 90, domain_cooldown_threshold: 3, domain_cooldown_seconds: 21600 } : {}),
       ...(type === "moemail" ? { api_base: "", api_key: "", domain: [] } : {}),
       ...(type === "inbucket" ? { api_base: "", domain: [], random_subdomain: true } : {}),
       ...(type === "duckmail" ? { api_key: "", default_domain: "duckmail.sbs" } : {}),
@@ -184,6 +184,7 @@ export function RegisterCard() {
                 const type = String(provider.type || "tempmail_lol");
                 const domains = Array.isArray(provider.domain) ? provider.domain.map(String).join("\n") : "";
                 const subdomains = Array.isArray(provider.subdomain) ? provider.subdomain.map(String).join("\n") : "";
+                const domainStats = Array.isArray(provider.domain_stats) ? provider.domain_stats as Array<Record<string, unknown>> : [];
                 return (
                   <div key={index} className="space-y-3 border-t border-stone-200 pt-3 first:border-t-0 first:pt-0">
                     <div className="flex items-center justify-between gap-3">
@@ -300,6 +301,14 @@ export function RegisterCard() {
                             <label className="text-sm text-stone-700">网络错误重试预算（秒，不含限流等待）</label>
                             <Input type="number" min={15} value={String(provider.create_total_budget ?? 90)} onChange={(event) => updateProvider(index, { create_total_budget: Number(event.target.value) })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
                           </div>
+                          <div className="space-y-2">
+                            <label className="text-sm text-stone-700">域名连续超时阈值</label>
+                            <Input type="number" min={1} value={String(provider.domain_cooldown_threshold ?? 3)} onChange={(event) => updateProvider(index, { domain_cooldown_threshold: Number(event.target.value) })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm text-stone-700">域名冷却时间（秒）</label>
+                            <Input type="number" min={60} value={String(provider.domain_cooldown_seconds ?? 21600)} onChange={(event) => updateProvider(index, { domain_cooldown_seconds: Number(event.target.value) })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                          </div>
                         </>
                       ) : null}
                       {type === "duckmail" || type === "gptmail" ? (
@@ -344,6 +353,24 @@ export function RegisterCard() {
                         </>
                       ) : null}
                     </div>
+
+                    {type === "tempmail_lol" && domainStats.length ? (
+                      <div className="mt-3 space-y-2 rounded-lg border border-stone-200 bg-white/70 p-3">
+                        <div className="text-xs font-semibold text-stone-700">域名验证码投递统计</div>
+                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                          {domainStats.map((item) => (
+                            <div key={String(item.domain || "unknown")} className="rounded-md bg-stone-50 px-2.5 py-2 text-xs text-stone-600">
+                              <div className="flex items-center justify-between gap-2 font-medium text-stone-800">
+                                <span className="truncate">{String(item.domain || "unknown")}</span>
+                                {item.cooling ? <span className="text-amber-600">冷却中</span> : null}
+                              </div>
+                              <div className="mt-1">收到 {Number(item.received || 0)} · 超时 {Number(item.timeouts || 0)} · 成功率 {Number(item.success_rate || 0)}%</div>
+                              <div className="mt-0.5 text-stone-400">连续超时 {Number(item.consecutive_timeouts || 0)} · 跳过 {Number(item.skipped || 0)}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
 
                     {type === "outlook_token" ? (() => {
                       const stats = (provider.mailboxes_stats || {}) as Record<string, number>;
