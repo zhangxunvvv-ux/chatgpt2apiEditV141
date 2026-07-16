@@ -59,7 +59,14 @@ class TempMailLolProviderTests(unittest.TestCase):
         self.assertEqual(mail_provider._parse_tempmail_keys(" key-a, key-b\nkey-a "), ["key-a", "key-b"])
         self.assertEqual(mail_provider._parse_tempmail_keys(""), [""])
 
-    def test_create_rotates_key_after_429_without_domain_filter(self) -> None:
+    def test_parses_optional_multiline_domains(self) -> None:
+        self.assertEqual(
+            mail_provider.parse_tempmail_domains(" @First.Example\nsecond.example,first.example. "),
+            ["first.example", "second.example"],
+        )
+        self.assertEqual(mail_provider.parse_tempmail_domains(""), [])
+
+    def test_create_rotates_key_after_429_with_specified_domain(self) -> None:
         session = FakeSession(
             [
                 FakeResponse(429, {"error": "rate limited"}, "rate limited"),
@@ -70,7 +77,7 @@ class TempMailLolProviderTests(unittest.TestCase):
             {
                 "provider_ref": "tempmail-test-429",
                 "api_key": "key-one\nkey-two",
-                "domain": ["*.example.com"],
+                "domain": ["abc12.example.com"],
                 "rate_per_window": 24,
                 "window_seconds": 300,
                 "rate_limit_cooldown_seconds": 600,
@@ -109,7 +116,7 @@ class TempMailLolProviderTests(unittest.TestCase):
         second_payload = session.requests[1]["json"]
         self.assertIsInstance(second_payload, dict)
         assert isinstance(second_payload, dict)
-        self.assertNotIn("domain", second_payload)
+        self.assertEqual(second_payload["domain"], "abc12.example.com")
         self.assertTrue(re.fullmatch(r"[a-z]{5}\d{1,3}[a-z]{1,3}", str(second_payload["prefix"])))
 
     def test_429_cooldown_is_shared_by_provider_instances(self) -> None:
@@ -188,13 +195,13 @@ class TempMailLolProviderTests(unittest.TestCase):
             [{"Authorization": "Bearer key-one"}, {"Authorization": "Bearer key-two"}],
         )
 
-    def test_configured_domain_is_ignored_and_created_address_is_accepted(self) -> None:
+    def test_configured_domain_is_sent_and_created_address_is_accepted(self) -> None:
         session = FakeSession([FakeResponse(201, {"address": "mail@random-provider.example", "token": "token"})])
         provider = self.make_provider(
             {
                 "provider_ref": "tempmail-test-domain",
                 "api_key": "key",
-                "domain": ["not-a-domain"],
+                "domain": ["requested.example"],
             },
             session,
         )
@@ -203,7 +210,48 @@ class TempMailLolProviderTests(unittest.TestCase):
 
         self.assertEqual(mailbox["address"], "mail@random-provider.example")
         self.assertEqual(len(session.requests), 1)
+        self.assertEqual(session.requests[0]["json"]["domain"], "requested.example")
+
+    def test_empty_domain_is_not_sent(self) -> None:
+        session = FakeSession([FakeResponse(201, {"address": "mail@automatic.example", "token": "token-auto"})])
+        provider = self.make_provider(
+            {
+                "provider_ref": "tempmail-test-auto-domain",
+                "api_key": "key",
+                "domain": ["", "  "],
+            },
+            session,
+        )
+
+        provider.create_mailbox()
+
         self.assertNotIn("domain", session.requests[0]["json"])
+
+    def test_multiple_domains_rotate_across_provider_instances(self) -> None:
+        first_session = FakeSession(
+            [FakeResponse(201, {"address": "first@one.example", "token": "token-one"})]
+        )
+        second_session = FakeSession(
+            [FakeResponse(201, {"address": "second@two.example", "token": "token-two"})]
+        )
+        entry = {
+            "provider_ref": "tempmail-test-domain-rotation",
+            "api_key": "key",
+            "domain": "one.example\ntwo.example",
+        }
+        first_provider = self.make_provider(entry, first_session)
+        second_provider = self.make_provider(entry, second_session)
+
+        first_provider.create_mailbox()
+        second_provider.create_mailbox()
+
+        self.assertEqual(
+            [
+                first_session.requests[0]["json"]["domain"],
+                second_session.requests[0]["json"]["domain"],
+            ],
+            ["one.example", "two.example"],
+        )
 
     def test_key_pool_enforces_sliding_window_limit(self) -> None:
         pool = mail_provider._TempMailKeyPool(["only-key"], rate=1, window=300)
@@ -384,7 +432,7 @@ class TempMailLolProviderTests(unittest.TestCase):
 
         self.assertEqual(mailbox["address"], "direct@next.airfryersbg.com")
         self.assertEqual(len(session.requests), 1)
-        self.assertNotIn("domain", session.requests[0]["json"])
+        self.assertEqual(session.requests[0]["json"]["domain"], "whitelist.example")
         self.assertEqual(stats["airfryersbg.com"]["consecutive_timeouts"], 3)
         self.assertNotIn("cooling", stats["airfryersbg.com"])
 

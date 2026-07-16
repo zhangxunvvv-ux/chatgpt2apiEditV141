@@ -1194,6 +1194,37 @@ _tempmail_pool_lock = Lock()
 _tempmail_pools: dict[str, tuple[tuple[tuple[str, ...], int, float], _TempMailKeyPool]] = {}
 _tempmail_token_key_lock = Lock()
 _tempmail_token_keys: dict[str, str] = {}
+_tempmail_domain_cursor_lock = Lock()
+_tempmail_domain_cursors: dict[str, tuple[tuple[str, ...], int]] = {}
+
+
+def parse_tempmail_domains(raw: Any) -> list[str]:
+    """Normalize optional TempMail.lol domains from a list or multiline text."""
+    values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+    domains: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for piece in _TEMPMAIL_KEY_SPLIT_RE.split(str(value or "")):
+            domain = piece.strip().lower().lstrip("@").rstrip(".")
+            if not domain or domain in seen:
+                continue
+            seen.add(domain)
+            domains.append(domain)
+    return domains
+
+
+def _next_tempmail_domain(provider_ref: str, domains: list[str]) -> str:
+    """Round-robin domains across short-lived provider instances and threads."""
+    signature = tuple(domains)
+    if not signature:
+        return ""
+    scope = provider_ref or "tempmail_lol#default"
+    with _tempmail_domain_cursor_lock:
+        current = _tempmail_domain_cursors.get(scope)
+        index = current[1] if current is not None and current[0] == signature else 0
+        domain = signature[index % len(signature)]
+        _tempmail_domain_cursors[scope] = (signature, (index + 1) % len(signature))
+        return domain
 
 
 def _get_tempmail_pool(provider_ref: str, keys: list[str], rate: int, window: float) -> _TempMailKeyPool:
@@ -1248,6 +1279,7 @@ class TempMailLolProvider(BaseMailProvider):
         super().__init__(conf, str(entry.get("provider_ref") or ""))
         raw_keys = entry.get("api_key") or entry.get("tempmail_api_key") or ""
         self.api_keys = _parse_tempmail_keys(raw_keys)
+        self.domains = parse_tempmail_domains(entry.get("domain"))
         self.rate_per_window = max(1, _tempmail_int(entry.get("rate_per_window", entry.get("tempmail_rate_per_window", 24)), 24))
         self.window_seconds = max(10.0, _tempmail_float(entry.get("window_seconds", entry.get("tempmail_window_seconds", 300)), 300))
         self.max_wait = max(0.0, _tempmail_float(entry.get("max_wait", entry.get("tempmail_max_wait", 600)), 600))
@@ -1312,6 +1344,7 @@ class TempMailLolProvider(BaseMailProvider):
         backoff = 1.0
         last_error: Exception | None = None
         last_status: int | None = None
+        selected_domain = _next_tempmail_domain(self.provider_ref, self.domains)
 
         for _attempt in range(1, max_attempts + 1):
             # Server-side 429 cooldown is shared and does not consume the
@@ -1324,6 +1357,8 @@ class TempMailLolProvider(BaseMailProvider):
             # can become available after the transient-request budget has elapsed.
             api_key = self.key_pool.acquire(self.max_wait)
             payload: dict[str, Any] = {"prefix": username or _random_mailbox_name()}
+            if selected_domain:
+                payload["domain"] = selected_domain
 
             try:
                 data = self._request("POST", "/inbox/create", api_key=api_key, payload=payload, expected=(200, 201))

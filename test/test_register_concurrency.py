@@ -11,7 +11,7 @@ from services import register_service as register_service_module
 
 
 class RegisterConcurrencyTests(unittest.TestCase):
-    def test_normalize_removes_tempmail_domain_restrictions(self) -> None:
+    def test_normalize_keeps_tempmail_domains_without_legacy_cooldown(self) -> None:
         config = register_service_module._normalize(
             {
                 "mail": {
@@ -20,7 +20,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
                             "type": "tempmail_lol",
                             "enable": True,
                             "api_key": "test-key",
-                            "domain": ["whitelist.example"],
+                            "domain": "First.Example\nsecond.example,first.example",
                             "domain_cooldown_threshold": 3,
                             "domain_cooldown_seconds": 21600,
                         }
@@ -30,7 +30,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
         )
 
         provider = config["mail"]["providers"][0]
-        self.assertNotIn("domain", provider)
+        self.assertEqual(provider["domain"], ["first.example", "second.example"])
         self.assertNotIn("domain_cooldown_threshold", provider)
         self.assertNotIn("domain_cooldown_seconds", provider)
 

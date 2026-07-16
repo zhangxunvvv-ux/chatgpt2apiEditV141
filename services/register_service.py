@@ -74,7 +74,7 @@ def _normalize(raw: dict) -> dict:
             if isinstance(provider, dict):
                 provider.pop("domain_stats", None)
                 if provider.get("type") == "tempmail_lol":
-                    provider.pop("domain", None)
+                    provider["domain"] = mail_provider.parse_tempmail_domains(provider.get("domain"))
                     provider.pop("domain_cooldown_threshold", None)
                     provider.pop("domain_cooldown_seconds", None)
     cfg["enabled"] = bool(cfg.get("enabled"))
