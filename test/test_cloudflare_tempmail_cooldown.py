@@ -91,20 +91,18 @@ class CloudflareTempMailCooldownTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 1)
         sleep.assert_not_called()
 
-    def test_wait_for_code_scans_all_mail_details(self):
+    def test_wait_for_code_scans_all_list_messages_without_detail_requests(self):
         session = FakeSession(
             [
                 FakeResponse(
                     200,
                     {
                         "results": [
-                            {"id": "notice", "subject": "Welcome"},
-                            {"id": "otp", "subject": "OpenAI verification"},
+                            {"id": "notice", "subject": "Welcome", "text": "No verification code here"},
+                            {"id": "otp", "subject": "OpenAI verification", "text": "Verification code: 432198"},
                         ]
                     },
                 ),
-                FakeResponse(200, {"id": "notice", "text": "No verification code here"}),
-                FakeResponse(200, {"id": "otp", "text": "Verification code: 432198"}),
             ]
         )
         provider = self.provider(session)
@@ -113,10 +111,38 @@ class CloudflareTempMailCooldownTests(unittest.TestCase):
         code = provider.wait_for_code(mailbox)
 
         self.assertEqual(code, "432198")
-        self.assertEqual(len(session.calls), 3)
+        self.assertEqual(len(session.calls), 1)
         self.assertTrue(session.calls[0]["url"].endswith("/api/mails"))
-        self.assertTrue(session.calls[1]["url"].endswith("/api/mails/notice"))
-        self.assertTrue(session.calls[2]["url"].endswith("/api/mails/otp"))
+
+    def test_pre_send_baseline_does_not_consume_just_delivered_code(self):
+        session = FakeSession(
+            [FakeResponse(200, {"results": [{"id": "otp", "subject": "Verification code: 846210"}]})]
+        )
+        provider = self.provider(session)
+        mailbox = {"address": "user@example.test", "token": "mail-token"}
+
+        provider.prepare_code_baseline(mailbox)
+        code = provider.wait_for_code(mailbox)
+
+        self.assertEqual(code, "846210")
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(mailbox.get("_rejected_verification_codes"), [])
+
+    def test_list_message_is_rechecked_when_body_arrives_later(self):
+        session = FakeSession(
+            [
+                FakeResponse(200, {"results": [{"id": "same", "subject": "OpenAI", "text": ""}]}),
+                FakeResponse(200, {"results": [{"id": "same", "subject": "OpenAI", "text": "Your code is 654321"}]}),
+            ]
+        )
+        provider = self.provider(session)
+        mailbox = {"address": "user@example.test", "token": "mail-token"}
+
+        with mock.patch.object(mail_provider.time, "sleep", return_value=None):
+            code = provider.wait_for_code(mailbox)
+
+        self.assertEqual(code, "654321")
+        self.assertEqual(len(session.calls), 2)
 
     def test_account_creation_failed_activates_the_same_600_second_cooldown(self):
         session = FakeSession([FakeResponse(200, {"address": "user@example.test", "jwt": "mail-token"})])
