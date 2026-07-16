@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Activity, CheckCircle2, Clock3, LoaderCircle, RefreshCw, ShieldAlert, X } from "lucide-react";
+import { Activity, CheckCircle2, Clock3, Copy, LoaderCircle, RefreshCw, ShieldAlert, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { fetchAccountDiagnostics, type AccountPoolDiagnostics } from "@/lib/api";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 
 const severityMeta = {
@@ -25,9 +26,31 @@ function formatDuration(value: number) {
   return `${(value / 1000).toFixed(1)}s`;
 }
 
+function buildAiAnalysisText(data: AccountPoolDiagnostics) {
+  return [
+    "请分析下面的号池与生图异常数据，判断影响成功率的主要原因，并按优先级给出调度、账号维护、并发和网络方面的优化建议。数据已经脱敏，不包含 Token。",
+    "",
+    "```json",
+    JSON.stringify(
+      {
+        generated_at: data.generated_at,
+        pool_summary: data.summary,
+        error_categories: data.error_categories,
+        abnormal_accounts: data.anomalies,
+        recent_image_logs: data.recent_events,
+        collection_performance: data.performance,
+      },
+      null,
+      2,
+    ),
+    "```",
+  ].join("\n");
+}
+
 export function AccountDiagnosticsPanel({ onClose }: { onClose: () => void }) {
   const [data, setData] = useState<AccountPoolDiagnostics | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isCopying, setIsCopying] = useState(false);
 
   const loadDiagnostics = async () => {
     setIsLoading(true);
@@ -43,6 +66,19 @@ export function AccountDiagnosticsPanel({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     void loadDiagnostics();
   }, []);
+
+  const copyForAi = async () => {
+    if (!data) return;
+    setIsCopying(true);
+    try {
+      await copyTextToClipboard(buildAiAnalysisText(data));
+      toast.success("异常分析数据已复制，可直接粘贴给 AI");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "复制异常分析失败");
+    } finally {
+      setIsCopying(false);
+    }
+  };
 
   return (
     <section className="space-y-3">
@@ -62,6 +98,16 @@ export function AccountDiagnosticsPanel({ onClose }: { onClose: () => void }) {
               </p>
             </div>
             <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="rounded-lg border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                onClick={() => void copyForAi()}
+                disabled={!data || isLoading || isCopying}
+              >
+                {isCopying ? <LoaderCircle className="size-4 animate-spin" /> : <Copy className="size-4" />}
+                一键复制给 AI
+              </Button>
               <Button
                 variant="outline"
                 size="sm"

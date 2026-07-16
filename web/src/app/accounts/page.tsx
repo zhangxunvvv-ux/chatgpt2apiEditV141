@@ -61,6 +61,7 @@ import {
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
+import { copyTextToClipboard } from "@/lib/clipboard";
 
 import { AccountImportDialog } from "./components/account-import-dialog";
 import { AccountDiagnosticsPanel } from "./components/account-diagnostics-panel";
@@ -1166,8 +1167,9 @@ function AccountsPageContent() {
                             type="button"
                             className="inline-flex size-8 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-400 transition hover:border-stone-300 hover:bg-stone-50 hover:text-stone-800"
                             onClick={() => {
-                              void navigator.clipboard.writeText(account.access_token);
-                              toast.success("Token 已复制");
+                              void copyTextToClipboard(account.access_token)
+                                .then(() => toast.success("Token 已复制"))
+                                .catch((error) => toast.error(error instanceof Error ? error.message : "Token 复制失败"));
                             }}
                             title="复制 Token"
                             aria-label="复制 Token"
