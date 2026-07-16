@@ -14,7 +14,7 @@ from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from threading import Lock
 from typing import Any, Callable, TypeVar
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from curl_cffi import requests
 
@@ -531,6 +531,9 @@ class CloudflareTempMailProvider(BaseMailProvider):
         self.rate_limit_cooldown_seconds = max(1.0, cooldown)
         self._cooldown_key = f"{self.api_base}|{self.provider_ref or self.name}"
         self.session = _create_session(conf)
+        self._message_detail_cache: dict[str, dict[str, Any]] = {}
+        self._poll_detail_success = 0
+        self._poll_detail_errors = 0
 
     def _request(self, method: str, path: str, headers: dict | None = None, params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200,)):
         while True:
@@ -572,18 +575,108 @@ class CloudflareTempMailProvider(BaseMailProvider):
             raise RuntimeError(f"CloudflareTempMail 无法获取已有邮箱 {email} 的 JWT")
         return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "token": token}
 
-    def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
-        data = self._request("GET", "/api/mails", headers={"Authorization": f"Bearer {mailbox['token']}"}, params={"limit": 10, "offset": 0})
-        raw = list(data.get("results") or []) if isinstance(data, dict) else data if isinstance(data, list) else []
-        messages = [item for item in raw if isinstance(item, dict) and _message_matches_email(item, str(mailbox.get("address") or ""))]
-        if not messages:
-            return None
-        item = messages[0]
+    def _normalize_message(self, mailbox: dict[str, Any], item: dict[str, Any], *, detail_complete: bool) -> dict[str, Any]:
         text_content, html_content = _extract_content(item)
         sender = item.get("from") or item.get("sender") or ""
         if isinstance(sender, dict):
             sender = sender.get("address") or sender.get("email") or sender.get("name") or ""
-        return {"provider": self.name, "mailbox": mailbox["address"], "message_id": str(item.get("id") or item.get("_id") or ""), "subject": str(item.get("subject") or ""), "sender": str(sender), "text_content": text_content, "html_content": html_content, "received_at": _parse_received_at(item.get("createdAt") or item.get("created_at") or item.get("receivedAt") or item.get("date") or item.get("timestamp")), "raw": item}
+        return {
+            "provider": self.name,
+            "mailbox": mailbox["address"],
+            "message_id": str(item.get("id") or item.get("_id") or ""),
+            "subject": str(item.get("subject") or ""),
+            "sender": str(sender),
+            "text_content": text_content,
+            "html_content": html_content,
+            "received_at": _parse_received_at(
+                item.get("createdAt")
+                or item.get("created_at")
+                or item.get("receivedAt")
+                or item.get("date")
+                or item.get("timestamp")
+            ),
+            "detail_complete": detail_complete,
+            "raw": item,
+        }
+
+    @staticmethod
+    def _unwrap_message_detail(data: Any) -> dict[str, Any] | None:
+        if not isinstance(data, dict):
+            return None
+        for key in ("message", "data", "result"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                return value
+        return data
+
+    def fetch_recent_messages(self, mailbox: dict[str, Any]) -> list[dict[str, Any]]:
+        headers = {"Authorization": f"Bearer {mailbox['token']}"}
+        data = self._request("GET", "/api/mails", headers=headers, params={"limit": 20, "offset": 0})
+        raw = list(data.get("results") or []) if isinstance(data, dict) else data if isinstance(data, list) else []
+        summaries = [item for item in raw if isinstance(item, dict) and _message_matches_email(item, str(mailbox.get("address") or ""))]
+        messages: list[dict[str, Any]] = []
+        for summary in summaries:
+            message_id = str(summary.get("id") or summary.get("_id") or "").strip()
+            detail = self._message_detail_cache.get(message_id) if message_id else None
+            detail_complete = detail is not None
+            if message_id and detail is None:
+                try:
+                    payload = self._request("GET", f"/api/mails/{quote(message_id, safe='')}", headers=headers)
+                    unwrapped = self._unwrap_message_detail(payload)
+                    if unwrapped is not None:
+                        detail = {**summary, **unwrapped}
+                        self._message_detail_cache[message_id] = detail
+                        detail_complete = True
+                        self._poll_detail_success += 1
+                except Exception:
+                    self._poll_detail_errors += 1
+            messages.append(self._normalize_message(mailbox, detail or summary, detail_complete=detail_complete))
+        return messages
+
+    def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
+        messages = self.fetch_recent_messages(mailbox)
+        return messages[0] if messages else None
+
+    def wait_for_code(self, mailbox: dict[str, Any]) -> str | None:
+        seen_value = mailbox.setdefault("_seen_code_message_refs", [])
+        if not isinstance(seen_value, list):
+            seen_value = []
+            mailbox["_seen_code_message_refs"] = seen_value
+        seen_refs = {str(item) for item in seen_value}
+        deadline = time.monotonic() + self.conf["wait_timeout"]
+        scanned = boundary_filtered = no_code = last_batch = 0
+
+        while time.monotonic() < deadline:
+            messages = self.fetch_recent_messages(mailbox)
+            last_batch = len(messages)
+            for message in messages:
+                if _message_before_code_boundary(mailbox, message):
+                    boundary_filtered += 1
+                    continue
+                ref = _message_tracking_ref(message)
+                if ref in seen_refs:
+                    continue
+                scanned += 1
+                code = _extract_code(message)
+                if code and not _verification_code_rejected(mailbox, code):
+                    seen_value.append(ref)
+                    seen_refs.add(ref)
+                    return code
+                if message.get("detail_complete") or code:
+                    seen_value.append(ref)
+                    seen_refs.add(ref)
+                no_code += 1
+            time.sleep(max(0.2, self.conf["wait_interval"]))
+
+        domain = str(mailbox.get("address") or "").partition("@")[2]
+        _provider_log(
+            "CloudflareTempMail 验证码轮询超时: "
+            f"provider_ref={self.provider_ref or self.name}, domain={domain or 'unknown'}, "
+            f"wait_seconds={self.conf['wait_timeout']:.0f}, last_batch={last_batch}, scanned={scanned}, "
+            f"no_code={no_code}, boundary_filtered={boundary_filtered}, "
+            f"detail_ok={self._poll_detail_success}, detail_errors={self._poll_detail_errors}"
+        )
+        return None
 
     def close(self) -> None:
         self.session.close()

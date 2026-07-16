@@ -72,6 +72,21 @@ class RegistrationOtpRetryTests(unittest.TestCase):
         self.assertEqual(validate.call_args_list[1].args[2], "222222")
         self.assertEqual(mailbox["_rejected_verification_codes"], ["111111"])
 
+    def test_mailbox_timeout_retries_all_four_wait_windows(self) -> None:
+        registrar = openai_register.PlatformRegistrar("")
+        mailbox = {"address": "user@example.com"}
+        accepted = FakeResponse(200)
+
+        with (
+            mock.patch.object(openai_register, "wait_for_code", side_effect=[None, None, None, "222222"]) as wait,
+            mock.patch.object(openai_register, "validate_otp", return_value=(accepted, "")) as validate,
+        ):
+            registrar._validate_mailbox_otp(mailbox, 1)
+
+        registrar.close()
+        self.assertEqual(wait.call_count, 4)
+        validate.assert_called_once_with(registrar.session, registrar.device_id, "222222")
+
     def test_validate_does_not_resubmit_same_known_wrong_code_with_sentinel(self) -> None:
         wrong = FakeResponse(401, "wrong_email_otp_code")
 

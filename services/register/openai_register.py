@@ -799,7 +799,10 @@ class PlatformRegistrar:
             step(index, f"开始等待注册验证码（第 {attempt}/{max_attempts} 次）")
             code = wait_for_code(mailbox, register_proxy=self.proxy)
             if not code:
-                raise RuntimeError(last_detail or "等待注册验证码超时")
+                if attempt >= max_attempts:
+                    raise RuntimeError(last_detail or "等待注册验证码超时")
+                step(index, f"第 {attempt}/{max_attempts} 次等待未收到验证码，继续等待", "yellow")
+                continue
             step(index, f"收到注册验证码: {code}")
             step(index, f"开始校验验证码 {code}")
             resp, error = validate_otp(self.session, self.device_id, code)

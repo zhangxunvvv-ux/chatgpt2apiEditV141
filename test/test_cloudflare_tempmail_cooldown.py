@@ -91,6 +91,33 @@ class CloudflareTempMailCooldownTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 1)
         sleep.assert_not_called()
 
+    def test_wait_for_code_scans_all_mail_details(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {
+                        "results": [
+                            {"id": "notice", "subject": "Welcome"},
+                            {"id": "otp", "subject": "OpenAI verification"},
+                        ]
+                    },
+                ),
+                FakeResponse(200, {"id": "notice", "text": "No verification code here"}),
+                FakeResponse(200, {"id": "otp", "text": "Verification code: 432198"}),
+            ]
+        )
+        provider = self.provider(session)
+        mailbox = {"address": "user@example.test", "token": "mail-token"}
+
+        code = provider.wait_for_code(mailbox)
+
+        self.assertEqual(code, "432198")
+        self.assertEqual(len(session.calls), 3)
+        self.assertTrue(session.calls[0]["url"].endswith("/api/mails"))
+        self.assertTrue(session.calls[1]["url"].endswith("/api/mails/notice"))
+        self.assertTrue(session.calls[2]["url"].endswith("/api/mails/otp"))
+
     def test_account_creation_failed_activates_the_same_600_second_cooldown(self):
         session = FakeSession([FakeResponse(200, {"address": "user@example.test", "jwt": "mail-token"})])
         provider = self.provider(session)
