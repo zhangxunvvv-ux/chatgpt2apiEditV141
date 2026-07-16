@@ -61,7 +61,7 @@ export function RegisterCard() {
       enable: true,
       ...(type === "cloudmail_gen" ? { api_base: "", admin_email: "", admin_password: "", domain: [], subdomain: [], email_prefix: "" } : {}),
       ...(type === "cloudflare_temp_email" ? { api_base: "", admin_password: "", domain: [] } : {}),
-      ...(type === "tempmail_lol" ? { api_key: "", rate_per_window: 24, window_seconds: 300, max_wait: 600, create_total_budget: 90 } : {}),
+      ...(type === "tempmail_lol" ? { api_key: "", rate_per_window: 24, window_seconds: 300, rate_limit_cooldown_seconds: 600, max_wait: 600, create_total_budget: 90 } : {}),
       ...(type === "moemail" ? { api_base: "", api_key: "", domain: [] } : {}),
       ...(type === "inbucket" ? { api_base: "", domain: [], random_subdomain: true } : {}),
       ...(type === "duckmail" ? { api_key: "", default_domain: "duckmail.sbs" } : {}),
@@ -292,6 +292,10 @@ export function RegisterCard() {
                           <div className="space-y-2">
                             <label className="text-sm text-stone-700">限流窗口（秒）</label>
                             <Input type="number" min={10} value={String(provider.window_seconds ?? 300)} onChange={(event) => updateProvider(index, { window_seconds: Number(event.target.value) })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm text-stone-700">HTTP 429 全线程冷却（秒）</label>
+                            <Input type="number" min={1} value={String(provider.rate_limit_cooldown_seconds ?? 600)} onChange={(event) => updateProvider(index, { rate_limit_cooldown_seconds: Number(event.target.value) })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
                           </div>
                           <div className="space-y-2">
                             <label className="text-sm text-stone-700">全部 Key 限流时最长等待（秒）</label>

@@ -73,15 +73,35 @@ class TempMailLolProviderTests(unittest.TestCase):
                 "domain": ["*.example.com"],
                 "rate_per_window": 24,
                 "window_seconds": 300,
+                "rate_limit_cooldown_seconds": 600,
                 "max_wait": 0,
                 "create_total_budget": 15,
             },
             session,
         )
+        clock = [100.0]
+        sleeps: list[float] = []
+        logs: list[str] = []
 
-        mailbox = provider.create_mailbox()
+        def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        mail_provider.provider_log_sink = logs.append
+        try:
+            with mock.patch.object(mail_provider.time, "monotonic", side_effect=lambda: clock[0]), mock.patch.object(
+                mail_provider.time, "sleep", side_effect=fake_sleep
+            ):
+                mailbox = provider.create_mailbox()
+        finally:
+            mail_provider.provider_log_sink = None
 
         self.assertEqual(mailbox["token"], "token-429")
+        self.assertEqual(sleeps, [600.0])
+        self.assertEqual(sum("触发 HTTP 429" in item for item in logs), 1)
+        self.assertEqual(sum("冷却结束" in item for item in logs), 1)
+        self.assertNotIn("key-one", "\n".join(logs))
+        self.assertNotIn("token-429", "\n".join(logs))
         self.assertEqual([request["headers"] for request in session.requests], [
             {"Authorization": "Bearer key-one"},
             {"Authorization": "Bearer key-two"},
@@ -91,6 +111,40 @@ class TempMailLolProviderTests(unittest.TestCase):
         assert isinstance(second_payload, dict)
         self.assertNotIn("domain", second_payload)
         self.assertTrue(re.fullmatch(r"[a-z]{5}\d{1,3}[a-z]{1,3}", str(second_payload["prefix"])))
+
+    def test_429_cooldown_is_shared_by_provider_instances(self) -> None:
+        entry = {
+            "provider_ref": "tempmail-shared-429",
+            "api_key": "shared-key",
+            "window_seconds": 10,
+            "rate_limit_cooldown_seconds": 600,
+        }
+        first = self.make_provider(entry, FakeSession([]))
+        second = self.make_provider(entry, FakeSession([]))
+        clock = [50.0]
+        sleeps: list[float] = []
+        logs: list[str] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        mail_provider.provider_log_sink = logs.append
+        try:
+            with mock.patch.object(mail_provider.time, "monotonic", side_effect=lambda: clock[0]), mock.patch.object(
+                mail_provider.time, "sleep", side_effect=fake_sleep
+            ):
+                first._activate_rate_limit_cooldown()
+                second._activate_rate_limit_cooldown()
+                waited = second.key_pool.wait_for_global_cooldown()
+        finally:
+            mail_provider.provider_log_sink = None
+
+        self.assertIs(first.key_pool, second.key_pool)
+        self.assertEqual(waited, 600.0)
+        self.assertEqual(sleeps, [600.0])
+        self.assertEqual(sum("触发 HTTP 429" in item for item in logs), 1)
+        self.assertEqual(sum("冷却结束" in item for item in logs), 1)
 
     def test_create_fails_fast_for_fatal_4xx(self) -> None:
         session = FakeSession([FakeResponse(403, {"error": "forbidden"}, "forbidden")])

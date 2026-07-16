@@ -1103,6 +1103,8 @@ class _TempMailKeyPool:
         self._lock = Lock()
         self._usage = {key: deque() for key in self.keys}
         self._rate_limited_until = {key: 0.0 for key in self.keys}
+        self._global_rate_limited_until = 0.0
+        self._global_cooldown_active = False
         self._cursor = 0
 
     def _trim_locked(self, key: str, now: float) -> None:
@@ -1142,6 +1144,37 @@ class _TempMailKeyPool:
             usage.clear()
             usage.extend(now for _ in range(self.rate))
             self._rate_limited_until[key] = now + self.window
+
+    def activate_global_cooldown(self, seconds: float) -> bool:
+        """Pause mailbox creation across all providers sharing this key pool."""
+        with self._lock:
+            now = time.monotonic()
+            until = now + max(1.0, seconds)
+            if self._global_cooldown_active and self._global_rate_limited_until > now:
+                self._global_rate_limited_until = max(self._global_rate_limited_until, until)
+                return False
+            self._global_rate_limited_until = until
+            self._global_cooldown_active = True
+            return True
+
+    def wait_for_global_cooldown(self) -> float:
+        """Wait for the shared 429 cooldown and return time excluded from retry budgets."""
+        started = time.monotonic()
+        waited = False
+        while True:
+            should_log_resume = False
+            with self._lock:
+                if not self._global_cooldown_active:
+                    return max(0.0, time.monotonic() - started) if waited else 0.0
+                remaining = self._global_rate_limited_until - time.monotonic()
+                if remaining <= 0:
+                    self._global_cooldown_active = False
+                    should_log_resume = True
+            if should_log_resume:
+                _provider_log("TempMail.lol 429 冷却结束，恢复邮箱创建")
+                return max(0.0, time.monotonic() - started) if waited else 0.0
+            waited = True
+            time.sleep(remaining)
 
     def cooldown_remaining(self, key: str) -> float:
         with self._lock:
@@ -1219,6 +1252,13 @@ class TempMailLolProvider(BaseMailProvider):
         self.window_seconds = max(10.0, _tempmail_float(entry.get("window_seconds", entry.get("tempmail_window_seconds", 300)), 300))
         self.max_wait = max(0.0, _tempmail_float(entry.get("max_wait", entry.get("tempmail_max_wait", 600)), 600))
         self.create_total_budget = max(15.0, _tempmail_float(entry.get("create_total_budget", entry.get("tempmail_create_total_budget", 90)), 90))
+        self.rate_limit_cooldown_seconds = max(
+            1.0,
+            _tempmail_float(
+                entry.get("rate_limit_cooldown_seconds", entry.get("tempmail_rate_limit_cooldown_seconds", 600)),
+                600,
+            ),
+        )
         self.key_pool = _get_tempmail_pool(self.provider_ref, self.api_keys, self.rate_per_window, self.window_seconds)
         self._last_status_code: int | None = None
         self.session = _create_session(conf)
@@ -1259,6 +1299,13 @@ class TempMailLolProvider(BaseMailProvider):
             )
         return data
 
+    def _activate_rate_limit_cooldown(self) -> None:
+        if self.key_pool.activate_global_cooldown(self.rate_limit_cooldown_seconds):
+            _provider_log(
+                f"TempMail.lol 触发 HTTP 429，所有邮箱创建线程暂停 "
+                f"{self.rate_limit_cooldown_seconds:.0f} 秒后自动恢复"
+            )
+
     def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
         max_attempts = max(4, len(self.api_keys) * 2 + 2)
         deadline = time.monotonic() + self.create_total_budget
@@ -1267,6 +1314,9 @@ class TempMailLolProvider(BaseMailProvider):
         last_status: int | None = None
 
         for _attempt in range(1, max_attempts + 1):
+            # Server-side 429 cooldown is shared and does not consume the
+            # transient retry budget for this mailbox creation attempt.
+            deadline += self.key_pool.wait_for_global_cooldown()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -1283,6 +1333,7 @@ class TempMailLolProvider(BaseMailProvider):
                 kind = _classify_tempmail_error(error)
                 if kind == "rate_limit":
                     self.key_pool.mark_rate_limited(api_key)
+                    self._activate_rate_limit_cooldown()
                     continue
                 if kind == "transient":
                     time.sleep(min(backoff, max(0.0, deadline - time.monotonic())))
@@ -1418,6 +1469,7 @@ class TempMailLolProvider(BaseMailProvider):
                 if error.status_code == 429:
                     http_429 += 1
                     self.key_pool.mark_rate_limited(api_key)
+                    self._activate_rate_limit_cooldown()
                     fallback = self.key_pool.available_key(exclude={api_key})
                     if fallback is not None:
                         api_key = fallback
