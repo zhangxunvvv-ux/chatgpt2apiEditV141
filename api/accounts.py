@@ -212,6 +212,14 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         return {"items": account_service.list_accounts()}
 
+    @router.get("/api/accounts/diagnostics")
+    async def get_account_diagnostics(
+            recent_limit: int = 30,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        return await run_in_threadpool(account_service.get_pool_diagnostics, recent_limit)
+
     @router.post("/api/accounts")
     async def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)

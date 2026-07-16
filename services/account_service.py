@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import secrets
 import time
 import uuid
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +17,7 @@ from urllib.parse import urlencode
 from services.config import config
 from services.log_service import (
     LOG_TYPE_ACCOUNT,
+    LOG_TYPE_CALL,
     log_service,
 )
 from services.storage.base import StorageBackend
@@ -38,6 +41,19 @@ class AccountService:
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/145.0.0.0 Safari/537.36"
     )
+    _IMAGE_ERROR_META = {
+        "quota": ("额度不足", "优先补充额度或等待恢复时间，避免继续把请求分配给零额度账号。"),
+        "rate_limit": ("上游限流", "降低单账号并发并延长复用间隔，优先切换到近期成功账号。"),
+        "invalid_token": ("Token 失效", "刷新或重新登录账号，并检查 refresh token 是否还能正常轮换。"),
+        "poll_timeout": ("轮询超时", "检查出口网络和任务轮询状态；短时间集中出现时应降低并发。"),
+        "connection_timeout": ("连接超时", "检查代理出口稳定性，并按账号或出口统计超时率。"),
+        "tls": ("TLS/网络错误", "检查代理、证书链和出口质量，避免把网络问题误判为账号异常。"),
+        "content_policy": ("内容策略", "这通常与提示词有关，不应据此淘汰账号；调整提示词后重试。"),
+        "upstream_text": ("返回文本未生图", "优先选择近期成功账号，并观察模型或账号类型是否集中出现该问题。"),
+        "no_image": ("未返回图片", "检查上游任务结果与模型兼容性，并对近期成功账号提高调度权重。"),
+        "auth": ("认证流程异常", "检查账号会话、Sentinel 或登录刷新链路。"),
+        "upstream_error": ("其他上游异常", "查看最近日志中的错误摘要，并按模型、账号类型和出口进一步分组。"),
+    }
 
     # 刷新进度追踪
     _refresh_progress: dict[str, dict] = {}
@@ -240,6 +256,14 @@ class AccountService:
         normalized["image_consecutive_failures"] = int(normalized.get("image_consecutive_failures") or 0)
         normalized["last_image_success_at"] = normalized.get("last_image_success_at") or None
         normalized["last_image_failure_at"] = normalized.get("last_image_failure_at") or None
+        normalized["last_image_error"] = normalized.get("last_image_error") or None
+        normalized["last_image_error_category"] = normalized.get("last_image_error_category") or None
+        error_counts = normalized.get("image_error_counts")
+        normalized["image_error_counts"] = {
+            str(key): max(0, int(value or 0))
+            for key, value in error_counts.items()
+            if str(key) and isinstance(value, (int, float))
+        } if isinstance(error_counts, dict) else {}
         normalized["invalid_count"] = int(normalized.get("invalid_count") or 0)
         normalized["last_used_at"] = normalized.get("last_used_at")
         normalized["last_invalid_at"] = normalized.get("last_invalid_at") or None
@@ -1235,6 +1259,197 @@ class AccountService:
                 result.append(account)
             return result
 
+    @classmethod
+    def classify_image_error(cls, error: object) -> str:
+        text = str(error or "").strip().lower()
+        if not text:
+            return "upstream_error"
+        if "content_policy" in text or "safety" in text or "policy violation" in text or "内容策略" in text:
+            return "content_policy"
+        if "no available image quota" in text or "insufficient_quota" in text or "quota" in text or "额度" in text:
+            return "quota"
+        if "429" in text or "rate limit" in text or "too many requests" in text or "限流" in text:
+            return "rate_limit"
+        if "invalid token" in text or "token invalid" in text or "unauthorized" in text or "401" in text:
+            return "invalid_token"
+        if ("poll" in text and "timeout" in text) or "轮询超时" in text:
+            return "poll_timeout"
+        if "curl: (28)" in text or "connection timeout" in text or "timed out" in text or "连接超时" in text:
+            return "connection_timeout"
+        if "tls" in text or "ssl" in text or "certificate" in text:
+            return "tls"
+        if "text description" in text or "text reply" in text or "returned text" in text or "返回文本" in text:
+            return "upstream_text"
+        if "no_image_generated" in text or "without generating images" in text or "未返回图片" in text:
+            return "no_image"
+        if "sentinel" in text or "authentication" in text or "auth" in text:
+            return "auth"
+        return "upstream_error"
+
+    @staticmethod
+    def _safe_image_error(error: object, limit: int = 240) -> str:
+        text = " ".join(str(error or "").split())
+        text = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1[redacted]", text)
+        text = re.sub(r"\bsk-[A-Za-z0-9_-]{16,}\b", "[redacted-token]", text)
+        text = re.sub(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_.-]{20,}\b", "[redacted-token]", text)
+        return text[:limit]
+
+    def get_pool_diagnostics(self, recent_limit: int = 30) -> dict[str, Any]:
+        """Build an on-demand pool snapshot without background scans or extra writes."""
+        with self._lock:
+            accounts: list[dict[str, Any]] = []
+            now_ts = time.time()
+            for token, item in self._accounts.items():
+                account = dict(item)
+                for secret_key in ("access_token", "refresh_token", "id_token", "session_token", "cookie", "password"):
+                    account.pop(secret_key, None)
+                account["image_inflight"] = int(self._image_inflight.get(token, 0))
+                submitted_at = float(self._image_last_submitted_at.get(token, 0.0))
+                account["image_inflight_age_seconds"] = max(0, int(now_ts - submitted_at)) if submitted_at else 0
+                accounts.append(account)
+
+        successes = sum(int(item.get("image_success_count") or 0) for item in accounts)
+        failures = sum(int(item.get("image_failure_count") or 0) for item in accounts)
+        attempts = successes + failures
+        error_counts: Counter[str] = Counter()
+        anomalies: list[dict[str, Any]] = []
+        severity_rank = {"high": 0, "medium": 1, "low": 2}
+
+        for account in accounts:
+            for category, count in (account.get("image_error_counts") or {}).items():
+                error_counts[str(category)] += max(0, int(count or 0))
+
+            reasons: list[str] = []
+            severity = "low"
+            status = str(account.get("status") or "正常")
+            quota_unknown = bool(account.get("image_quota_unknown"))
+            quota = max(0, int(account.get("quota") or 0))
+            account_successes = int(account.get("image_success_count") or 0)
+            account_failures = int(account.get("image_failure_count") or 0)
+            consecutive = int(account.get("image_consecutive_failures") or 0)
+            inflight = int(account.get("image_inflight") or 0)
+            inflight_age = int(account.get("image_inflight_age_seconds") or 0)
+
+            if status in {"异常", "禁用"}:
+                reasons.append(f"账号状态为{status}")
+                severity = "high"
+            elif status == "限流" or (not quota_unknown and quota <= 0):
+                reasons.append("账号已限流或图片额度为 0")
+                severity = "medium"
+            if inflight > 0 and inflight_age >= 10 * 60:
+                reasons.append(f"在途槽位已持续 {inflight_age // 60} 分钟，可能存在槽位泄漏")
+                severity = "high"
+            if consecutive >= 3:
+                reasons.append(f"连续生图失败 {consecutive} 次")
+                severity = "high"
+            account_attempts = account_successes + account_failures
+            if account_attempts >= 4 and account_failures / account_attempts >= 0.5:
+                reasons.append(f"历史生图失败率 {account_failures / account_attempts * 100:.1f}%")
+                if severity == "low":
+                    severity = "medium"
+            if account.get("last_token_refresh_error"):
+                reasons.append("最近一次 Token 刷新失败")
+                if severity == "low":
+                    severity = "medium"
+            if not reasons:
+                continue
+            anomalies.append({
+                "email": str(account.get("email") or "未记录邮箱"),
+                "type": str(account.get("type") or "free"),
+                "status": status,
+                "severity": severity,
+                "reasons": reasons,
+                "quota": quota,
+                "quota_unknown": quota_unknown,
+                "image_inflight": inflight,
+                "successes": account_successes,
+                "failures": account_failures,
+                "consecutive_failures": consecutive,
+                "last_error_category": str(account.get("last_image_error_category") or ""),
+                "last_error": self._safe_image_error(account.get("last_image_error")),
+                "last_event_at": account.get("last_image_failure_at") or account.get("last_used_at"),
+            })
+
+        anomalies.sort(
+            key=lambda item: (
+                severity_rank.get(str(item.get("severity")), 9),
+                -int(item.get("consecutive_failures") or 0),
+                str(item.get("email") or ""),
+            )
+        )
+
+        safe_recent_limit = max(1, min(int(recent_limit), 100))
+        recent_events: list[dict[str, Any]] = []
+        recent_error_counts: Counter[str] = Counter()
+        def is_image_log(item: dict[str, Any]) -> bool:
+            detail = item.get("detail") if isinstance(item.get("detail"), dict) else {}
+            return str(detail.get("endpoint") or "").startswith("/v1/images") or "生图" in str(item.get("summary") or "")
+
+        candidates = log_service.tail(
+            LOG_TYPE_CALL,
+            limit=safe_recent_limit,
+            scan_limit=max(1000, safe_recent_limit * 40),
+            predicate=is_image_log,
+        )
+        for item in candidates:
+            detail = item.get("detail") if isinstance(item.get("detail"), dict) else {}
+            summary = str(item.get("summary") or "")
+            status = str(detail.get("status") or "success")
+            error = self._safe_image_error(detail.get("error"))
+            category = self.classify_image_error(error) if status == "failed" else ""
+            if category:
+                recent_error_counts[category] += 1
+            recent_events.append({
+                "time": str(item.get("time") or detail.get("ended_at") or ""),
+                "status": status,
+                "summary": summary,
+                "email": str(detail.get("account_email") or ""),
+                "model": str(detail.get("model") or ""),
+                "duration_ms": max(0, int(detail.get("duration_ms") or 0)),
+                "error_category": category,
+                "error": error,
+            })
+            if len(recent_events) >= safe_recent_limit:
+                break
+
+        category_keys = set(error_counts) | set(recent_error_counts)
+        categories = []
+        for category in category_keys:
+            label, suggestion = self._IMAGE_ERROR_META.get(category, self._IMAGE_ERROR_META["upstream_error"])
+            categories.append({
+                "category": category,
+                "label": label,
+                "count": int(error_counts.get(category, 0)),
+                "recent_count": int(recent_error_counts.get(category, 0)),
+                "suggestion": suggestion,
+            })
+        categories.sort(key=lambda item: (-int(item["recent_count"]), -int(item["count"]), str(item["label"])))
+
+        available = sum(1 for item in accounts if self._is_image_account_available(item))
+        return {
+            "generated_at": self._now(),
+            "summary": {
+                "total": len(accounts),
+                "available": available,
+                "limited": sum(1 for item in accounts if item.get("status") == "限流"),
+                "abnormal": sum(1 for item in accounts if item.get("status") == "异常"),
+                "disabled": sum(1 for item in accounts if item.get("status") == "禁用"),
+                "inflight": sum(int(item.get("image_inflight") or 0) for item in accounts),
+                "attempts": attempts,
+                "successes": successes,
+                "failures": failures,
+                "success_rate": round(successes / attempts * 100, 2) if attempts else None,
+            },
+            "error_categories": categories,
+            "anomalies": anomalies[:100],
+            "recent_events": recent_events,
+            "performance": {
+                "background_jobs_added": 0,
+                "log_scan_limit": max(1000, safe_recent_limit * 40),
+                "diagnostics_mode": "on_demand",
+            },
+        }
+
     def list_limited_tokens(self) -> list[str]:
         with self._lock:
             return [
@@ -1450,7 +1665,14 @@ class AccountService:
                 return False
         return True
 
-    def mark_image_result(self, access_token: str, success: bool, *, release_slot: bool = True) -> dict | None:
+    def mark_image_result(
+        self,
+        access_token: str,
+        success: bool,
+        *,
+        release_slot: bool = True,
+        error: object = "",
+    ) -> dict | None:
         if not access_token:
             return None
         if release_slot:
@@ -1481,6 +1703,13 @@ class AccountService:
                 next_item["image_failure_count"] = int(next_item.get("image_failure_count") or 0) + 1
                 next_item["image_consecutive_failures"] = int(next_item.get("image_consecutive_failures") or 0) + 1
                 next_item["last_image_failure_at"] = now
+                safe_error = self._safe_image_error(error)
+                category = self.classify_image_error(safe_error)
+                next_item["last_image_error"] = safe_error or None
+                next_item["last_image_error_category"] = category
+                error_counts = dict(next_item.get("image_error_counts") or {})
+                error_counts[category] = int(error_counts.get(category) or 0) + 1
+                next_item["image_error_counts"] = error_counts
             account = self._normalize_account(next_item)
             if account is None:
                 return None

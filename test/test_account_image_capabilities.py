@@ -11,6 +11,7 @@ os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 from services.account_service import AccountService
 from services.auth_service import AuthService
 from services.config import config
+from services.log_service import log_service
 from services.openai_backend_api import InvalidAccessTokenError
 from services.storage.json_storage import JSONStorageBackend
 from utils.helper import anonymize_token, split_image_model
@@ -68,6 +69,58 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(updated["quota"], 0)
             self.assertEqual(updated["status"], "正常")
             self.assertTrue(updated["image_quota_unknown"])
+
+    def test_image_failure_records_sanitized_category_for_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "secret-access-token", "email": "pool@example.com", "status": "正常", "quota": 3}
+            ])
+
+            updated = service.mark_image_result(
+                "secret-access-token",
+                success=False,
+                error="HTTP 429 Bearer super-secret-bearer-value",
+            )
+
+            self.assertIsNotNone(updated)
+            self.assertEqual(updated["last_image_error_category"], "rate_limit")
+            self.assertEqual(updated["image_error_counts"], {"rate_limit": 1})
+            self.assertNotIn("super-secret-bearer-value", updated["last_image_error"])
+
+    def test_pool_diagnostics_has_no_tokens_and_uses_bounded_recent_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "secret-access-token", "email": "pool@example.com", "status": "正常", "quota": 3}
+            ])
+            for _ in range(3):
+                service.mark_image_result("secret-access-token", success=False, error="image poll timeout")
+
+            recent_log = {
+                "time": "2026-07-16 12:00:00",
+                "type": "call",
+                "summary": "文生图调用失败",
+                "detail": {
+                    "endpoint": "/v1/images/generations",
+                    "status": "failed",
+                    "account_email": "pool@example.com",
+                    "model": "gpt-image-2",
+                    "duration_ms": 1200,
+                    "error": "image poll timeout",
+                },
+            }
+            with patch.object(log_service, "tail", return_value=[recent_log]) as tail:
+                diagnostics = service.get_pool_diagnostics(recent_limit=10)
+
+            serialized = str(diagnostics)
+            self.assertNotIn("secret-access-token", serialized)
+            self.assertEqual(diagnostics["summary"]["failures"], 3)
+            self.assertEqual(diagnostics["error_categories"][0]["category"], "poll_timeout")
+            self.assertEqual(diagnostics["recent_events"][0]["email"], "pool@example.com")
+            self.assertEqual(diagnostics["anomalies"][0]["consecutive_failures"], 3)
+            self.assertEqual(diagnostics["performance"]["background_jobs_added"], 0)
+            tail.assert_called_once()
 
     def test_split_image_model_supports_plan_type_prefix(self) -> None:
         self.assertEqual(split_image_model("gpt-image-2"), (None, "gpt-image-2"))

@@ -39,10 +39,68 @@ export type Account = {
   image_consecutive_failures?: number;
   last_image_success_at?: string | null;
   last_image_failure_at?: string | null;
+  last_image_error?: string | null;
+  last_image_error_category?: string | null;
+  image_error_counts?: Record<string, number>;
   /** 当前图片在途数(正在生成、尚未结束的图片数)。号池空闲时持续 > 0 表示并发槽位泄漏。 */
   image_inflight?: number;
   last_used_at?: string | null;
+  created_at?: string | null;
   proxy?: string | null;
+};
+
+export type AccountPoolDiagnostics = {
+  generated_at: string;
+  summary: {
+    total: number;
+    available: number;
+    limited: number;
+    abnormal: number;
+    disabled: number;
+    inflight: number;
+    attempts: number;
+    successes: number;
+    failures: number;
+    success_rate: number | null;
+  };
+  error_categories: Array<{
+    category: string;
+    label: string;
+    count: number;
+    recent_count: number;
+    suggestion: string;
+  }>;
+  anomalies: Array<{
+    email: string;
+    type: string;
+    status: string;
+    severity: "high" | "medium" | "low";
+    reasons: string[];
+    quota: number;
+    quota_unknown: boolean;
+    image_inflight: number;
+    successes: number;
+    failures: number;
+    consecutive_failures: number;
+    last_error_category: string;
+    last_error: string;
+    last_event_at?: string | null;
+  }>;
+  recent_events: Array<{
+    time: string;
+    status: string;
+    summary: string;
+    email: string;
+    model: string;
+    duration_ms: number;
+    error_category: string;
+    error: string;
+  }>;
+  performance: {
+    background_jobs_added: number;
+    log_scan_limit: number;
+    diagnostics_mode: string;
+  };
 };
 
 export type AccountImportPayload = {
@@ -425,6 +483,10 @@ export async function login(authKey: string) {
 
 export async function fetchAccounts() {
   return httpRequest<AccountListResponse>("/api/accounts");
+}
+
+export async function fetchAccountDiagnostics(recentLimit = 30) {
+  return httpRequest<AccountPoolDiagnostics>(`/api/accounts/diagnostics?recent_limit=${recentLimit}`);
 }
 
 export async function fetchModels() {

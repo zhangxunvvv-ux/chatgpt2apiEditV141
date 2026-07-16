@@ -9,11 +9,12 @@ import {
   ChevronRight,
   CircleAlert,
   CircleOff,
-  Copy,
   Download,
+  KeyRound,
   Link2,
   LoaderCircle,
   LogIn,
+  Logs,
   Pencil,
   RefreshCw,
   Search,
@@ -62,6 +63,7 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
 import { AccountImportDialog } from "./components/account-import-dialog";
+import { AccountDiagnosticsPanel } from "./components/account-diagnostics-panel";
 
 const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] = [
   { label: "全部状态", value: "all" },
@@ -153,10 +155,36 @@ function formatQuotaSummary(accounts: Account[]) {
   return formatCompact(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
 }
 
-function maskToken(token?: string) {
-  if (!token) return "—";
-  if (token.length <= 18) return token;
-  return `${token.slice(0, 16)}...${token.slice(-8)}`;
+function parseAccountDate(value?: string | null) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw)
+    ? `${raw.replace(" ", "T")}Z`
+    : raw;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatAccountCreatedAt(value?: string | null) {
+  const date = parseAccountDate(value);
+  if (!date) return { date: "—", time: "" };
+  const pad = (number: number) => String(number).padStart(2, "0");
+  return {
+    date: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    time: `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+  };
+}
+
+function formatAccountLifetime(value: string | null | undefined, nowMs: number) {
+  const createdAt = parseAccountDate(value);
+  if (!createdAt) return "—";
+  const totalMinutes = Math.max(0, Math.floor((nowMs - createdAt.getTime()) / 60_000));
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return `${days}天 ${hours}小时 ${minutes}分`;
+  if (hours > 0) return `${hours}小时 ${minutes}分`;
+  return `${minutes}分钟`;
 }
 
 function downloadTokens(accounts: Account[]) {
@@ -206,6 +234,8 @@ function AccountsPageContent() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isRelogining, setIsRelogining] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [lifetimeNow, setLifetimeNow] = useState(() => Date.now());
   const [progress, setProgress] = useState<{
     visible: boolean;
     current: number;
@@ -265,6 +295,11 @@ function AccountsPageContent() {
     return () => {
       if (progressRef.current) clearInterval(progressRef.current);
     };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setLifetimeNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const filteredAccounts = useMemo(() => {
@@ -747,6 +782,19 @@ function AccountsPageContent() {
 
         <div className="flex flex-wrap items-center gap-2">
           <Button
+            variant={showDiagnostics ? "default" : "outline"}
+            className={cn(
+              "h-10 rounded-xl px-4",
+              showDiagnostics
+                ? "bg-stone-950 text-white hover:bg-stone-800"
+                : "border-stone-200 bg-white/80 text-stone-700 hover:bg-white",
+            )}
+            onClick={() => setShowDiagnostics((current) => !current)}
+          >
+            <Logs className="size-4" />
+            日志与异常分析
+          </Button>
+          <Button
             variant="outline"
             className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
             onClick={() => void loadAccounts()}
@@ -783,6 +831,8 @@ function AccountsPageContent() {
           </Button>
         </div>
       </section>
+
+      {showDiagnostics ? <AccountDiagnosticsPanel onClose={() => setShowDiagnostics(false)} /> : null}
 
       {/* 进度条 */}
       {progress.visible && (
@@ -1065,7 +1115,7 @@ function AccountsPageContent() {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1000px] text-left">
+              <table className="w-full min-w-[1120px] text-left">
                 <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
                   <tr>
                     <th className="w-12 px-4 py-3">
@@ -1074,12 +1124,13 @@ function AccountsPageContent() {
                         onCheckedChange={(checked) => toggleSelectAll(Boolean(checked))}
                       />
                     </th>
-                    <th className="w-56 px-4 py-3">token</th>
+                    <th className="w-16 px-4 py-3">Token</th>
                     <th className="w-28 px-4 py-3">类型</th>
                     <th className="w-24 px-4 py-3">来源</th>
                     <th className="w-24 px-4 py-3">状态</th>
                     <th className="w-56 px-4 py-3">账号信息</th>
-                    <th className="w-32 px-4 py-3">创建时间</th>
+                    <th className="w-36 px-4 py-3">创建时间</th>
+                    <th className="w-36 px-4 py-3">存活时间</th>
                     <th className="w-24 px-4 py-3">额度</th>
                     <th className="w-40 px-4 py-3">恢复时间</th>
                     <th className="w-18 px-4 py-3">在途</th>
@@ -1111,21 +1162,18 @@ function AccountsPageContent() {
                           />
                         </td>
                         <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium tracking-tight text-stone-700">
-                              {maskToken(account.access_token)}
-                            </span>
-                            <button
-                              type="button"
-                              className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
-                              onClick={() => {
-                                void navigator.clipboard.writeText(account.access_token);
-                                toast.success("token 已复制");
-                              }}
-                            >
-                              <Copy className="size-4" />
-                            </button>
-                          </div>
+                          <button
+                            type="button"
+                            className="inline-flex size-8 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-400 transition hover:border-stone-300 hover:bg-stone-50 hover:text-stone-800"
+                            onClick={() => {
+                              void navigator.clipboard.writeText(account.access_token);
+                              toast.success("Token 已复制");
+                            }}
+                            title="复制 Token"
+                            aria-label="复制 Token"
+                          >
+                            <KeyRound className="size-3.5" />
+                          </button>
                         </td>
                         <td className="px-4 py-3">
                           <Badge variant="secondary" className="rounded-md bg-stone-100 text-stone-700">
@@ -1151,14 +1199,17 @@ function AccountsPageContent() {
                         </td>
                         <td className="px-4 py-3 text-xs leading-5 text-stone-500">
                           {(() => {
-                            const raw = (account as any).created_at;
-                            if (!raw) return "—";
-                            try {
-                              const d = new Date(raw + "Z");
-                              if (isNaN(d.getTime())) return String(raw).slice(0, 10);
-                              return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-                            } catch { return String(raw).slice(0, 10); }
+                            const createdAt = formatAccountCreatedAt(account.created_at);
+                            return (
+                              <div className="tabular-nums">
+                                <div>{createdAt.date}</div>
+                                {createdAt.time ? <div>{createdAt.time}</div> : null}
+                              </div>
+                            );
                           })()}
+                        </td>
+                        <td className="px-4 py-3 text-xs font-medium whitespace-nowrap text-stone-600">
+                          {formatAccountLifetime(account.created_at, lifetimeNow)}
                         </td>
                         <td className="px-4 py-3">
                           <Badge variant="info" className="rounded-md">

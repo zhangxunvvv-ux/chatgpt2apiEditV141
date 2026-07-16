@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -84,6 +84,55 @@ class LogService:
                 continue
             items.append(item)
             if len(items) >= limit:
+                break
+        return items
+
+    def _recent_raw_lines(self, max_lines: int, chunk_size: int = 64 * 1024) -> Iterator[str]:
+        """Read a bounded number of lines from the end without loading the whole log."""
+        if not self.path.exists() or max_lines <= 0:
+            return
+        with self.path.open("rb") as file:
+            file.seek(0, 2)
+            position = file.tell()
+            pending = b""
+            yielded = 0
+            while position > 0 and yielded < max_lines:
+                read_size = min(chunk_size, position)
+                position -= read_size
+                file.seek(position)
+                pending = file.read(read_size) + pending
+                parts = pending.split(b"\n")
+                pending = parts[0]
+                for raw_line in reversed(parts[1:]):
+                    if not raw_line:
+                        continue
+                    yield raw_line.decode("utf-8", errors="replace")
+                    yielded += 1
+                    if yielded >= max_lines:
+                        return
+            if pending and yielded < max_lines:
+                yield pending.decode("utf-8", errors="replace")
+
+    def tail(
+        self,
+        type: str = "",
+        *,
+        limit: int = 200,
+        scan_limit: int = 2000,
+        predicate: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return recent matching logs with bounded disk I/O for diagnostics views."""
+        safe_limit = max(1, min(int(limit), 2000))
+        safe_scan_limit = max(safe_limit, min(int(scan_limit), 10000))
+        items: list[dict[str, Any]] = []
+        for reverse_index, raw_line in enumerate(self._recent_raw_lines(safe_scan_limit)):
+            item = self._parse_line(raw_line, -(reverse_index + 1))
+            if item is None or (type and item.get("type") != type):
+                continue
+            if predicate is not None and not predicate(item):
+                continue
+            items.append(item)
+            if len(items) >= safe_limit:
                 break
         return items
 

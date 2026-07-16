@@ -1308,9 +1308,9 @@ def _generate_single_image(
 
         attempt_request = replace(request, progress_callback=progress_callback)
 
-        def mark_result(success: bool) -> None:
+        def mark_result(success: bool, error: object = "") -> None:
             nonlocal slot_held
-            account_service.mark_image_result(token, success, release_slot=slot_held)
+            account_service.mark_image_result(token, success, release_slot=slot_held, error=error)
             slot_held = False
 
         try:
@@ -1335,10 +1335,10 @@ def _generate_single_image(
                 returned_result = returned_result or output.kind == "result"
                 outputs.append(output)
             if returned_message:
-                mark_result(False)
+                mark_result(False, "upstream returned text instead of generating an image")
                 return outputs
             if not returned_result:
-                mark_result(False)
+                mark_result(False, "upstream completed without generating images")
                 if emitted_for_token:
                     conv_id = outputs[-1].conversation_id if outputs else ""
                     raise ImageGenerationError(
@@ -1353,7 +1353,7 @@ def _generate_single_image(
             mark_result(True)
             return outputs
         except ImagePollTimeoutError as exc:
-            mark_result(False)
+            mark_result(False, exc)
             if account_email:
                 setattr(exc, "account_email", account_email)
             # 轮询超时：换账号重试
@@ -1379,7 +1379,7 @@ def _generate_single_image(
                 raise
             raise
         except ImageContentPolicyError as exc:
-            mark_result(False)
+            mark_result(False, exc)
             logger.warning({
                 "event": "image_stream_content_policy_error",
                 "request_token": token,
@@ -1396,7 +1396,7 @@ def _generate_single_image(
                 conversation_id=getattr(exc, "conversation_id", ""),
             ) from exc
         except ImageGenerationError as exc:
-            mark_result(False)
+            mark_result(False, exc)
             if account_email and not getattr(exc, "account_email", ""):
                 exc.account_email = account_email
             error_text = str(exc)
@@ -1438,7 +1438,7 @@ def _generate_single_image(
             })
             raise
         except Exception as exc:
-            mark_result(False)
+            mark_result(False, exc)
             last_error = str(exc)
             logger.warning({
                 "event": "image_stream_fail",

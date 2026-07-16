@@ -20,7 +20,7 @@ class _FakeAccountService:
     def release_image_slot(self, token: str) -> None:
         self.releases.append(token)
 
-    def mark_image_result(self, token: str, success: bool, *, release_slot: bool = True) -> None:
+    def mark_image_result(self, token: str, success: bool, *, release_slot: bool = True, error: object = "") -> None:
         self.results.append((token, success, release_slot))
 
 
