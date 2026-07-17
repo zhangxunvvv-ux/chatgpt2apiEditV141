@@ -11,6 +11,15 @@ from services import register_service as register_service_module
 
 
 class RegisterConcurrencyTests(unittest.TestCase):
+    @staticmethod
+    def wait_until(predicate, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return bool(predicate())
+
     def test_normalize_keeps_tempmail_domains_without_legacy_cooldown(self) -> None:
         config = register_service_module._normalize(
             {
@@ -75,6 +84,120 @@ class RegisterConcurrencyTests(unittest.TestCase):
 
             self.assertEqual(max_active, 3)
             self.assertFalse(service.get()["enabled"])
+
+    def test_total_mode_counts_successes_instead_of_failed_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
+            results = iter(
+                [
+                    {"ok": False, "error": "等待注册验证码超时"},
+                    {"ok": False, "error": "registration failed"},
+                    {"ok": True},
+                ]
+            )
+
+            with mock.patch.object(service, "_pool_metrics", return_value={"current_quota": 0, "current_available": 0}), mock.patch.object(
+                register_service_module.openai_register, "worker", side_effect=lambda _index: next(results)
+            ) as worker:
+                service.start(
+                    {
+                        "threads": 1,
+                        "total": 1,
+                        "mode": "total",
+                        "failure_backoff_threshold": 10,
+                    }
+                )
+                self.assertTrue(self.wait_until(lambda: not service.get()["enabled"]))
+
+            stats = service.get()["stats"]
+            self.assertEqual(worker.call_count, 3)
+            self.assertEqual(stats["success"], 1)
+            self.assertEqual(stats["fail"], 2)
+            self.assertEqual(stats["done"], 3)
+
+    def test_consecutive_failures_cool_down_then_resume_automatically(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
+            attempt_times: list[float] = []
+
+            def worker(_index: int) -> dict:
+                attempt_times.append(time.monotonic())
+                return {"ok": len(attempt_times) > 1, "error": "等待注册验证码超时"}
+
+            with mock.patch.object(service, "_pool_metrics", return_value={"current_quota": 0, "current_available": 0}), mock.patch.object(
+                register_service_module.openai_register, "worker", side_effect=worker
+            ):
+                service.start(
+                    {
+                        "threads": 1,
+                        "total": 1,
+                        "mode": "total",
+                        "failure_backoff_threshold": 1,
+                        "failure_backoff_seconds": 1,
+                    }
+                )
+                self.assertTrue(self.wait_until(lambda: not service.get()["enabled"], timeout=4))
+
+            self.assertEqual(len(attempt_times), 2)
+            self.assertGreaterEqual(attempt_times[1] - attempt_times[0], 0.9)
+            log_text = "\n".join(item["text"] for item in service.get()["logs"])
+            self.assertIn("无需人工干预", log_text)
+            self.assertIn("自动恢复", log_text)
+
+    def test_manual_stop_interrupts_long_failure_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
+            with mock.patch.object(service, "_pool_metrics", return_value={"current_quota": 0, "current_available": 0}), mock.patch.object(
+                register_service_module.openai_register,
+                "worker",
+                return_value={"ok": False, "error": "等待注册验证码超时"},
+            ):
+                service.start(
+                    {
+                        "threads": 1,
+                        "total": 1,
+                        "mode": "total",
+                        "failure_backoff_threshold": 1,
+                        "failure_backoff_seconds": 1200,
+                    }
+                )
+                self.assertTrue(self.wait_until(lambda: bool(service.get()["stats"].get("retry_at"))))
+                service.stop()
+                self.assertTrue(self.wait_until(lambda: not service._runner or not service._runner.is_alive(), timeout=3))
+
+            self.assertFalse(service.get()["enabled"])
+            self.assertIsNone(service.get()["stats"].get("retry_at"))
+
+    def test_scheduler_exception_is_supervised_and_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
+            original_run_loop = service._run_loop
+            calls = 0
+
+            def flaky_run_loop() -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("temporary scheduler failure")
+                original_run_loop()
+
+            with mock.patch.object(service, "_pool_metrics", return_value={"current_quota": 0, "current_available": 0}), mock.patch.object(
+                service, "_run_loop", side_effect=flaky_run_loop
+            ), mock.patch.object(register_service_module.openai_register, "worker", return_value={"ok": True}):
+                service.start(
+                    {
+                        "threads": 1,
+                        "total": 1,
+                        "mode": "total",
+                        "failure_backoff_seconds": 1,
+                    }
+                )
+                self.assertTrue(self.wait_until(lambda: not service.get()["enabled"], timeout=4))
+
+            stats = service.get()["stats"]
+            self.assertEqual(calls, 2)
+            self.assertEqual(stats["scheduler_restarts"], 1)
+            self.assertEqual(stats["success"], 1)
 
 
 if __name__ == "__main__":

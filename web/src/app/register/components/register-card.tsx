@@ -26,6 +26,8 @@ export function RegisterCard() {
   const setTargetQuota = useSettingsStore((state) => state.setRegisterTargetQuota);
   const setTargetAvailable = useSettingsStore((state) => state.setRegisterTargetAvailable);
   const setCheckInterval = useSettingsStore((state) => state.setRegisterCheckInterval);
+  const setFailureBackoffThreshold = useSettingsStore((state) => state.setRegisterFailureBackoffThreshold);
+  const setFailureBackoffSeconds = useSettingsStore((state) => state.setRegisterFailureBackoffSeconds);
   const setMailField = useSettingsStore((state) => state.setRegisterMailField);
   const setMailApiUseRegisterProxy = useSettingsStore((state) => state.setRegisterMailApiUseRegisterProxy);
   const addProvider = useSettingsStore((state) => state.addRegisterProvider);
@@ -53,6 +55,8 @@ export function RegisterCard() {
   if (!config) return null;
 
   const stats = config.stats || { success: 0, fail: 0, done: 0, running: 0, threads: config.threads };
+  const retryAt = stats.retry_at ? new Date(stats.retry_at) : null;
+  const isCooling = Boolean(config.enabled && retryAt && retryAt.getTime() > Date.now());
   const providers = config.mail.providers || [];
   const logs = config.logs || [];
   const updateProviderType = (index: number, type: string) => {
@@ -142,7 +146,17 @@ export function RegisterCard() {
               <label className="text-sm text-stone-700">检查间隔（秒）</label>
               <Input value={String(config.check_interval || "")} onChange={(event) => setCheckInterval(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || config.mode === "total"} />
             </div>
+            <div className="space-y-2">
+              <label className="text-sm text-stone-700">连续失败触发次数</label>
+              <Input type="number" min={1} value={String(config.failure_backoff_threshold || 3)} onChange={(event) => setFailureBackoffThreshold(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-stone-700">失败冷却时间（秒）</label>
+              <Input type="number" min={1} value={String(config.failure_backoff_seconds || 1200)} onChange={(event) => setFailureBackoffSeconds(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+            </div>
           </div>
+
+          <p className="text-xs leading-5 text-stone-500">默认连续失败 3 次后暂停 1200 秒（20 分钟），冷却期间任务保持启用并自动恢复；单次失败不会停止注册。</p>
 
           <div className="space-y-3 border-t border-stone-200 pt-3">
             <div className="flex items-center justify-between gap-3">
@@ -442,7 +456,7 @@ export function RegisterCard() {
                 <p className="mt-1 text-sm text-stone-500">SSE 实时推送当前状态。</p>
               </div>
               <Badge variant={config.enabled ? "success" : "secondary"} className="rounded-md">
-                {config.enabled ? "运行中" : "已停止"}
+                {isCooling ? "冷却等待" : config.enabled ? "运行中" : "已停止"}
               </Badge>
             </div>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -455,6 +469,8 @@ export function RegisterCard() {
                 ["平均注册单个", `${stats.avg_seconds || 0}s`],
                 ["当前额度", stats.current_quota || 0],
                 ["正常账号", stats.current_available || 0],
+                ["连续失败", stats.consecutive_failures || 0],
+                ["调度自恢复", stats.scheduler_restarts || 0],
               ].map(([label, value]) => (
                 <div key={label} className="border border-stone-200 bg-white/70 px-3 py-2">
                   <div className="text-xs text-stone-400">{label}</div>
@@ -462,6 +478,12 @@ export function RegisterCard() {
                 </div>
               ))}
             </div>
+            {isCooling && retryAt ? (
+              <div className="flex items-center gap-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                <LoaderCircle className="size-4 shrink-0 animate-spin" />
+                连续失败冷却中，预计 {retryAt.toLocaleTimeString()} 自动恢复，无需手动重启。
+              </div>
+            ) : null}
             <div className="grid grid-cols-3 gap-2">
               <Button className="h-10 rounded-xl bg-stone-950 px-3 text-white hover:bg-stone-800" onClick={() => void toggle()} disabled={isSaving}>
                 {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : config.enabled ? <Square className="size-4" /> : <Play className="size-4" />}

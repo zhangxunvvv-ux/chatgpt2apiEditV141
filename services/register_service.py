@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from services.account_service import account_service
@@ -37,7 +37,32 @@ def _now() -> str:
 
 
 def _default_config() -> dict:
-    return {**openai_register.config, "mode": "total", "target_quota": 100, "target_available": 10, "check_interval": 5, "enabled": False, "stats": {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": openai_register.config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0}}
+    return {
+        **openai_register.config,
+        "mode": "total",
+        "target_quota": 100,
+        "target_available": 10,
+        "check_interval": 5,
+        "failure_backoff_threshold": 3,
+        "failure_backoff_seconds": 1200,
+        "enabled": False,
+        "stats": {
+            "success": 0,
+            "fail": 0,
+            "done": 0,
+            "running": 0,
+            "threads": openai_register.config["threads"],
+            "elapsed_seconds": 0,
+            "avg_seconds": 0,
+            "success_rate": 0,
+            "current_quota": 0,
+            "current_available": 0,
+            "consecutive_failures": 0,
+            "retry_at": None,
+            "pause_reason": "",
+            "scheduler_restarts": 0,
+        },
+    }
 
 
 def _safe_bool(value: object, fallback: bool) -> bool:
@@ -62,6 +87,8 @@ def _normalize(raw: dict) -> dict:
     cfg["target_quota"] = max(1, int(cfg.get("target_quota") or 1))
     cfg["target_available"] = max(1, int(cfg.get("target_available") or 1))
     cfg["check_interval"] = max(1, int(cfg.get("check_interval") or 5))
+    cfg["failure_backoff_threshold"] = max(1, int(cfg.get("failure_backoff_threshold") or 3))
+    cfg["failure_backoff_seconds"] = max(1, int(cfg.get("failure_backoff_seconds") or 1200))
     cfg["proxy"] = str(cfg.get("proxy") or "").strip()
     default_mail = _default_config()["mail"] if isinstance(_default_config().get("mail"), dict) else {}
     mail = cfg.get("mail") if isinstance(cfg.get("mail"), dict) else {}
@@ -218,8 +245,33 @@ class RegisterService:
             self._config["enabled"] = True
             self._drop_mail_proxy()
             self._logs = []
-            metrics = self._pool_metrics()
-            self._config["stats"] = {"job_id": uuid.uuid4().hex, "success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], **metrics, "started_at": _now(), "updated_at": _now()}
+            try:
+                metrics = self._pool_metrics()
+            except Exception as error:
+                previous = self._config.get("stats") if isinstance(self._config.get("stats"), dict) else {}
+                metrics = {
+                    "current_quota": int(previous.get("current_quota") or 0),
+                    "current_available": int(previous.get("current_available") or 0),
+                }
+                self._append_log(
+                    f"号池初始指标读取失败（{type(error).__name__}），调度器将在后台自动重试",
+                    "yellow",
+                )
+            self._config["stats"] = {
+                "job_id": uuid.uuid4().hex,
+                "success": 0,
+                "fail": 0,
+                "done": 0,
+                "running": 0,
+                "threads": self._config["threads"],
+                **metrics,
+                "consecutive_failures": 0,
+                "retry_at": None,
+                "pause_reason": "",
+                "scheduler_restarts": 0,
+                "started_at": _now(),
+                "updated_at": _now(),
+            }
             openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": time.time()})
@@ -240,7 +292,22 @@ class RegisterService:
     def reset(self) -> dict:
         with self._lock:
             self._logs = []
-            self._config["stats"] = {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, **self._pool_metrics(), "updated_at": _now()}
+            self._config["stats"] = {
+                "success": 0,
+                "fail": 0,
+                "done": 0,
+                "running": 0,
+                "threads": self._config["threads"],
+                "elapsed_seconds": 0,
+                "avg_seconds": 0,
+                "success_rate": 0,
+                "consecutive_failures": 0,
+                "retry_at": None,
+                "pause_reason": "",
+                "scheduler_restarts": 0,
+                **self._pool_metrics(),
+                "updated_at": _now(),
+            }
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": 0.0})
             self._save()
@@ -277,8 +344,15 @@ class RegisterService:
             "current_available": len(normal),
         }
 
-    def _target_reached(self, cfg: dict, submitted: int) -> bool:
+    def _is_enabled(self) -> bool:
+        with self._lock:
+            return bool(self._config.get("enabled"))
+
+    def _target_reached(self, cfg: dict, successful: int, in_flight: int = 0) -> bool:
         mode = str(cfg.get("mode") or "total")
+        if mode == "total":
+            # A failed attempt must not consume the requested successful-account count.
+            return successful + in_flight >= int(cfg.get("total") or 1)
         metrics = self._pool_metrics()
         self._bump(**metrics)
         if mode == "quota":
@@ -289,7 +363,7 @@ class RegisterService:
             reached = metrics["current_available"] >= int(cfg.get("target_available") or 1)
             self._append_log(f"检查号池：当前正常账号={metrics['current_available']}，目标账号={cfg.get('target_available')}，当前剩余额度={metrics['current_quota']}，{'跳过注册' if reached else '继续注册'}", "yellow")
             return reached
-        return submitted >= int(cfg.get("total") or 1)
+        return False
 
     def _bump(self, **updates) -> None:
         with self._lock:
@@ -301,7 +375,6 @@ class RegisterService:
                     elapsed = max(0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(started_at)).total_seconds())
                 except Exception:
                     elapsed = 0.0
-                done = int(stats.get("done") or 0)
                 success = int(stats.get("success") or 0)
                 fail = int(stats.get("fail") or 0)
                 stats["elapsed_seconds"] = round(elapsed, 1)
@@ -310,20 +383,64 @@ class RegisterService:
             self._config["stats"]["updated_at"] = _now()
             self._save()
 
-    def _run(self) -> None:
+    def _wait_for_retry(self, seconds: int, reason: str) -> bool:
+        delay = max(1, int(seconds))
+        deadline = time.monotonic() + delay
+        retry_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+        self._bump(retry_at=retry_at, pause_reason=reason, running=0)
+        while self._is_enabled():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._bump(retry_at=None, pause_reason="", consecutive_failures=0)
+                self._append_log("失败冷却结束，注册调度自动恢复", "yellow")
+                return True
+            time.sleep(min(1.0, remaining))
+        self._bump(retry_at=None, pause_reason="", running=0)
+        return False
+
+    def _run_loop(self) -> None:
         threads = int(self.get()["threads"])
-        submitted, done, success, fail = 0, 0, 0, 0
+        initial_stats = self.get().get("stats") or {}
+        done = int(initial_stats.get("done") or 0)
+        success = int(initial_stats.get("success") or 0)
+        fail = int(initial_stats.get("fail") or 0)
+        consecutive_failures = int(initial_stats.get("consecutive_failures") or 0)
+        task_index = done
         with ThreadPoolExecutor(max_workers=threads) as executor:
             futures = set()
             while True:
                 cfg = self.get()
-                while self.get()["enabled"] and not self._target_reached(cfg, submitted) and len(futures) < threads:
-                    submitted += 1
-                    futures.add(executor.submit(openai_register.worker, submitted))
-                self._bump(running=len(futures), done=done, success=success, fail=fail)
-                if not futures and (not self.get()["enabled"] or str(cfg.get("mode") or "total") == "total"):
-                    break
+                threshold = max(1, int(cfg.get("failure_backoff_threshold") or 3))
+                while (
+                    self._is_enabled()
+                    and consecutive_failures < threshold
+                    and len(futures) < threads
+                    and not self._target_reached(cfg, success, len(futures))
+                ):
+                    task_index += 1
+                    futures.add(executor.submit(openai_register.worker, task_index))
+                self._bump(
+                    running=len(futures),
+                    done=done,
+                    success=success,
+                    fail=fail,
+                    consecutive_failures=consecutive_failures,
+                )
                 if not futures:
+                    if not self._is_enabled():
+                        break
+                    if str(cfg.get("mode") or "total") == "total" and self._target_reached(cfg, success):
+                        break
+                    if consecutive_failures >= threshold:
+                        delay = max(1, int(cfg.get("failure_backoff_seconds") or 1200))
+                        self._append_log(
+                            f"连续失败 {consecutive_failures} 次，暂停新注册 {delay} 秒；无需人工干预，冷却后自动恢复",
+                            "yellow",
+                        )
+                        if not self._wait_for_retry(delay, "consecutive_failures"):
+                            break
+                        consecutive_failures = 0
+                        continue
                     time.sleep(max(1, int(cfg.get("check_interval") or 5)))
                     continue
                 finished, futures = wait(futures, return_when=FIRST_COMPLETED)
@@ -331,15 +448,61 @@ class RegisterService:
                     done += 1
                     try:
                         result = future.result()
-                        success += 1 if result.get("ok") else 0
-                        fail += 0 if result.get("ok") else 1
-                    except Exception:
+                        ok = bool(isinstance(result, dict) and result.get("ok"))
+                    except Exception as error:
+                        ok = False
+                        self._append_log(
+                            f"注册工作线程异常（{type(error).__name__}），已计为失败并继续调度",
+                            "red",
+                        )
+                    if ok:
+                        success += 1
+                        consecutive_failures = 0
+                    else:
                         fail += 1
-        self._bump(running=0, done=done, success=success, fail=fail, finished_at=_now())
+                        consecutive_failures += 1
+                self._bump(
+                    running=len(futures),
+                    done=done,
+                    success=success,
+                    fail=fail,
+                    consecutive_failures=consecutive_failures,
+                )
+        self._bump(
+            running=0,
+            done=done,
+            success=success,
+            fail=fail,
+            consecutive_failures=consecutive_failures,
+            retry_at=None,
+            pause_reason="",
+            finished_at=_now(),
+        )
         with self._lock:
             self._config["enabled"] = False
             self._save()
         self._append_log(f"注册任务结束，成功{success}，失败{fail}", "yellow")
+
+    def _run(self) -> None:
+        while self._is_enabled():
+            try:
+                self._run_loop()
+                return
+            except Exception as error:
+                if not self._is_enabled():
+                    break
+                snapshot = self.get()
+                stats = snapshot.get("stats") if isinstance(snapshot.get("stats"), dict) else {}
+                restarts = int(stats.get("scheduler_restarts") or 0) + 1
+                delay = max(1, int(snapshot.get("failure_backoff_seconds") or 1200))
+                self._bump(running=0, scheduler_restarts=restarts)
+                self._append_log(
+                    f"注册调度器异常（{type(error).__name__}），不会停止任务；{delay} 秒后自动重试",
+                    "red",
+                )
+                if not self._wait_for_retry(delay, "scheduler_error"):
+                    break
+        self._bump(running=0, retry_at=None, pause_reason="")
 
 
 register_service = RegisterService(REGISTER_FILE)

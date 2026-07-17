@@ -346,6 +346,8 @@ type SettingsStore = {
   setRegisterTargetQuota: (value: string) => void;
   setRegisterTargetAvailable: (value: string) => void;
   setRegisterCheckInterval: (value: string) => void;
+  setRegisterFailureBackoffThreshold: (value: string) => void;
+  setRegisterFailureBackoffSeconds: (value: string) => void;
   setRegisterMailField: (key: "request_timeout" | "wait_timeout" | "wait_interval", value: string) => void;
   setRegisterMailApiUseRegisterProxy: (value: boolean) => void;
   addRegisterProvider: () => void;
@@ -969,6 +971,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, check_interval: Number(value) || 0 }, isRegisterDirty: true } : {});
   },
 
+  setRegisterFailureBackoffThreshold: (value) => {
+    set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, failure_backoff_threshold: Number(value) || 0 }, isRegisterDirty: true } : {});
+  },
+
+  setRegisterFailureBackoffSeconds: (value) => {
+    set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, failure_backoff_seconds: Number(value) || 0 }, isRegisterDirty: true } : {});
+  },
+
   setRegisterMailField: (key, value) => {
     set((state) => state.registerConfig ? {
       registerConfig: {
@@ -1041,6 +1051,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
         target_available: Math.max(1, Number(registerConfig.target_available) || 1),
         check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
+        failure_backoff_threshold: Math.max(1, Number(registerConfig.failure_backoff_threshold) || 3),
+        failure_backoff_seconds: Math.max(1, Number(registerConfig.failure_backoff_seconds) || 1200),
       });
       set({ registerConfig: data.register, isRegisterDirty: false });
       toast.success("注册配置已保存");
@@ -1067,6 +1079,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
           target_available: Math.max(1, Number(registerConfig.target_available) || 1),
           check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
+          failure_backoff_threshold: Math.max(1, Number(registerConfig.failure_backoff_threshold) || 3),
+          failure_backoff_seconds: Math.max(1, Number(registerConfig.failure_backoff_seconds) || 1200),
         });
       set({ registerConfig: data.register, isRegisterDirty: false });
       toast.success(registerConfig.enabled ? "注册任务已停止" : "注册任务已启动");
