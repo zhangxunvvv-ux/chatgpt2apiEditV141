@@ -20,6 +20,12 @@ class RegisterConcurrencyTests(unittest.TestCase):
             time.sleep(0.01)
         return bool(predicate())
 
+    def test_only_explicit_rate_limits_trigger_immediate_backoff(self) -> None:
+        self.assertEqual(register_service_module._immediate_backoff_reason("account_creation_failed"), "")
+        self.assertEqual(register_service_module._immediate_backoff_reason("Could not resolve host"), "")
+        self.assertEqual(register_service_module._immediate_backoff_reason("等待注册验证码超时"), "")
+        self.assertEqual(register_service_module._immediate_backoff_reason("HTTP 429 Too Many Requests"), "rate_limit")
+
     def test_normalize_keeps_tempmail_domains_without_legacy_cooldown(self) -> None:
         config = register_service_module._normalize(
             {
@@ -120,7 +126,6 @@ class RegisterConcurrencyTests(unittest.TestCase):
                         "threads": 1,
                         "total": 1,
                         "mode": "total",
-                        "failure_backoff_threshold": 10,
                     }
                 )
                 self.assertTrue(self.wait_until(lambda: not service.get()["enabled"]))
@@ -131,7 +136,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
             self.assertEqual(stats["fail"], 2)
             self.assertEqual(stats["done"], 3)
 
-    def test_consecutive_failures_cool_down_then_resume_automatically(self) -> None:
+    def test_verification_failure_continues_without_global_cooldown(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
             attempt_times: list[float] = []
@@ -148,19 +153,18 @@ class RegisterConcurrencyTests(unittest.TestCase):
                         "threads": 1,
                         "total": 1,
                         "mode": "total",
-                        "failure_backoff_threshold": 1,
                         "failure_backoff_seconds": 1,
                     }
                 )
                 self.assertTrue(self.wait_until(lambda: not service.get()["enabled"], timeout=4))
 
             self.assertEqual(len(attempt_times), 2)
-            self.assertGreaterEqual(attempt_times[1] - attempt_times[0], 0.9)
+            self.assertLess(attempt_times[1] - attempt_times[0], 0.5)
             log_text = "\n".join(item["text"] for item in service.get()["logs"])
-            self.assertIn("无需人工干预", log_text)
-            self.assertIn("自动恢复", log_text)
+            self.assertNotIn("HTTP 429", log_text)
+            self.assertNotIn("自动恢复", log_text)
 
-    def test_account_creation_risk_enters_backoff_after_first_failure(self) -> None:
+    def test_account_creation_failure_continues_without_global_cooldown(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
             attempt_times: list[float] = []
@@ -179,7 +183,36 @@ class RegisterConcurrencyTests(unittest.TestCase):
                         "threads": 1,
                         "total": 1,
                         "mode": "total",
-                        "failure_backoff_threshold": 99,
+                        "failure_backoff_seconds": 1,
+                    }
+                )
+                self.assertTrue(self.wait_until(lambda: not service.get()["enabled"], timeout=4))
+
+            self.assertEqual(len(attempt_times), 2)
+            self.assertLess(attempt_times[1] - attempt_times[0], 0.5)
+            log_text = "\n".join(item["text"] for item in service.get()["logs"])
+            self.assertNotIn("HTTP 429", log_text)
+            self.assertNotIn("自动恢复", log_text)
+
+    def test_http_429_enters_backoff_then_resumes_automatically(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
+            attempt_times: list[float] = []
+
+            def worker(_index: int) -> dict:
+                attempt_times.append(time.monotonic())
+                if len(attempt_times) == 1:
+                    return {"ok": False, "error": "mail request failed: HTTP 429 Too Many Requests"}
+                return {"ok": True}
+
+            with mock.patch.object(service, "_pool_metrics", return_value={"current_quota": 0, "current_available": 0}), mock.patch.object(
+                register_service_module.openai_register, "worker", side_effect=worker
+            ):
+                service.start(
+                    {
+                        "threads": 1,
+                        "total": 1,
+                        "mode": "total",
                         "failure_backoff_seconds": 1,
                     }
                 )
@@ -188,7 +221,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
             self.assertEqual(len(attempt_times), 2)
             self.assertGreaterEqual(attempt_times[1] - attempt_times[0], 0.9)
             log_text = "\n".join(item["text"] for item in service.get()["logs"])
-            self.assertIn("按 429 处理", log_text)
+            self.assertIn("HTTP 429/明确限流", log_text)
             self.assertIn("自动恢复", log_text)
 
     def test_manual_stop_interrupts_long_failure_cooldown(self) -> None:
@@ -197,14 +230,13 @@ class RegisterConcurrencyTests(unittest.TestCase):
             with mock.patch.object(service, "_pool_metrics", return_value={"current_quota": 0, "current_available": 0}), mock.patch.object(
                 register_service_module.openai_register,
                 "worker",
-                return_value={"ok": False, "error": "等待注册验证码超时"},
+                return_value={"ok": False, "error": "HTTP 429 Too Many Requests"},
             ):
                 service.start(
                     {
                         "threads": 1,
                         "total": 1,
                         "mode": "total",
-                        "failure_backoff_threshold": 1,
                         "failure_backoff_seconds": 1200,
                     }
                 )

@@ -18,12 +18,8 @@ REGISTER_FILE = DATA_DIR / "register.json"
 
 def _immediate_backoff_reason(error: object) -> str:
     text = str(error or "").lower()
-    if "account_creation_failed" in text or "registration_disallowed" in text:
-        return "account_creation_risk"
-    if "http 429" in text or "http_429" in text or "rate limit" in text:
+    if "http 429" in text or "http_429" in text or "rate limit" in text or "too many requests" in text:
         return "rate_limit"
-    if "getaddrinfo() thread failed to start" in text or "could not resolve host" in text:
-        return "network_resolution"
     return ""
 
 
@@ -54,7 +50,6 @@ def _default_config() -> dict:
         "target_quota": 100,
         "target_available": 10,
         "check_interval": 5,
-        "failure_backoff_threshold": 3,
         "failure_backoff_seconds": 1200,
         "enabled": False,
         "stats": {
@@ -98,7 +93,7 @@ def _normalize(raw: dict) -> dict:
     cfg["target_quota"] = max(1, int(cfg.get("target_quota") or 1))
     cfg["target_available"] = max(1, int(cfg.get("target_available") or 1))
     cfg["check_interval"] = max(1, int(cfg.get("check_interval") or 5))
-    cfg["failure_backoff_threshold"] = max(1, int(cfg.get("failure_backoff_threshold") or 3))
+    cfg.pop("failure_backoff_threshold", None)
     cfg["failure_backoff_seconds"] = max(1, int(cfg.get("failure_backoff_seconds") or 1200))
     cfg["proxy"] = str(cfg.get("proxy") or "").strip()
     default_mail = _default_config()["mail"] if isinstance(_default_config().get("mail"), dict) else {}
@@ -426,10 +421,9 @@ class RegisterService:
             futures = set()
             while True:
                 cfg = self.get()
-                threshold = max(1, int(cfg.get("failure_backoff_threshold") or 3))
                 while (
                     self._is_enabled()
-                    and consecutive_failures < threshold
+                    and not immediate_pause_reason
                     and len(futures) < threads
                     and not self._target_reached(cfg, success, len(futures))
                 ):
@@ -447,19 +441,13 @@ class RegisterService:
                         break
                     if str(cfg.get("mode") or "total") == "total" and self._target_reached(cfg, success):
                         break
-                    if consecutive_failures >= threshold:
+                    if immediate_pause_reason:
                         delay = max(1, int(cfg.get("failure_backoff_seconds") or 1200))
-                        if immediate_pause_reason:
-                            self._append_log(
-                                f"检测到全局风控/限流/解析故障，按 429 处理并暂停新注册 {delay} 秒；冷却后自动恢复",
-                                "yellow",
-                            )
-                        else:
-                            self._append_log(
-                                f"连续失败 {consecutive_failures} 次，暂停新注册 {delay} 秒；无需人工干预，冷却后自动恢复",
-                                "yellow",
-                            )
-                        if not self._wait_for_retry(delay, immediate_pause_reason or "consecutive_failures"):
+                        self._append_log(
+                            f"检测到 HTTP 429/明确限流，暂停新注册 {delay} 秒；冷却后自动恢复",
+                            "yellow",
+                        )
+                        if not self._wait_for_retry(delay, immediate_pause_reason):
                             break
                         consecutive_failures = 0
                         immediate_pause_reason = ""
@@ -490,7 +478,6 @@ class RegisterService:
                         reason = _immediate_backoff_reason(failure_error)
                         if reason:
                             immediate_pause_reason = reason
-                            consecutive_failures = max(consecutive_failures, threshold)
                 self._bump(
                     running=len(futures),
                     done=done,

@@ -446,7 +446,6 @@ export type RegisterConfig = {
   target_quota: number;
   target_available: number;
   check_interval: number;
-  failure_backoff_threshold: number;
   failure_backoff_seconds: number;
   stats: {
     job_id?: string;

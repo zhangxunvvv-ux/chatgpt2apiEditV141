@@ -26,7 +26,6 @@ export function RegisterCard() {
   const setTargetQuota = useSettingsStore((state) => state.setRegisterTargetQuota);
   const setTargetAvailable = useSettingsStore((state) => state.setRegisterTargetAvailable);
   const setCheckInterval = useSettingsStore((state) => state.setRegisterCheckInterval);
-  const setFailureBackoffThreshold = useSettingsStore((state) => state.setRegisterFailureBackoffThreshold);
   const setFailureBackoffSeconds = useSettingsStore((state) => state.setRegisterFailureBackoffSeconds);
   const setMailField = useSettingsStore((state) => state.setRegisterMailField);
   const setMailApiUseRegisterProxy = useSettingsStore((state) => state.setRegisterMailApiUseRegisterProxy);
@@ -57,13 +56,7 @@ export function RegisterCard() {
   const stats = config.stats || { success: 0, fail: 0, done: 0, running: 0, threads: config.threads };
   const retryAt = stats.retry_at ? new Date(stats.retry_at) : null;
   const isCooling = Boolean(config.enabled && retryAt && retryAt.getTime() > Date.now());
-  const coolingReason = stats.pause_reason === "account_creation_risk"
-    ? "账号创建风控"
-    : stats.pause_reason === "rate_limit"
-      ? "接口限流"
-      : stats.pause_reason === "network_resolution"
-        ? "网络解析故障"
-        : "连续失败";
+  const coolingReason = stats.pause_reason === "scheduler_error" ? "调度异常" : "接口限流";
   const providers = config.mail.providers || [];
   const logs = config.logs || [];
   const updateProviderType = (index: number, type: string) => {
@@ -154,16 +147,12 @@ export function RegisterCard() {
               <Input value={String(config.check_interval || "")} onChange={(event) => setCheckInterval(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || config.mode === "total"} />
             </div>
             <div className="space-y-2">
-              <label className="text-sm text-stone-700">连续失败触发次数</label>
-              <Input type="number" min={1} value={String(config.failure_backoff_threshold || 3)} onChange={(event) => setFailureBackoffThreshold(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm text-stone-700">失败冷却时间（秒）</label>
+              <label className="text-sm text-stone-700">429 冷却时间（秒）</label>
               <Input type="number" min={1} value={String(config.failure_backoff_seconds || 1200)} onChange={(event) => setFailureBackoffSeconds(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
             </div>
           </div>
 
-          <p className="text-xs leading-5 text-stone-500">默认连续失败 3 次后暂停 1200 秒（20 分钟）；账号创建风控、429 或 DNS 解析故障首次出现即进入冷却。任务保持启用并自动恢复。</p>
+          <p className="text-xs leading-5 text-stone-500">只有明确的 HTTP 429/限流才冷却，默认 1200 秒（20 分钟）。账号创建失败、验证码失败和网络错误会继续注册，不会触发全局冷却。</p>
 
           <div className="space-y-3 border-t border-stone-200 pt-3">
             <div className="flex items-center justify-between gap-3">
