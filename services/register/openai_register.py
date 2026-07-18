@@ -397,6 +397,24 @@ def extract_oauth_callback_params_from_url(url: str) -> dict[str, str] | None:
     return {"code": code, "state": str((params.get("state") or [""])[0]).strip(), "scope": str((params.get("scope") or [""])[0]).strip()}
 
 
+def _extract_continue_url(data: dict[str, Any] | None) -> str:
+    if not isinstance(data, dict):
+        return ""
+    direct = str(data.get("continue_url") or data.get("continueUrl") or "").strip()
+    if direct:
+        return direct
+    page = data.get("page") if isinstance(data.get("page"), dict) else {}
+    payload = page.get("payload") if isinstance(page.get("payload"), dict) else {}
+    return str(payload.get("continue_url") or payload.get("continueUrl") or "").strip()
+
+
+def _url_path(url: str) -> str:
+    try:
+        return urlparse(str(url or "").strip()).path.rstrip("/") or "/"
+    except Exception:
+        return ""
+
+
 def request_platform_oauth_token(session: requests.Session, code: str, code_verifier: str) -> dict | None:
     headers = {
         "accept": "application/json",
@@ -446,6 +464,9 @@ class PlatformRegistrar:
         self.code_verifier = ""
         self.platform_auth_code = ""
         self.chatgpt_callback_url = ""
+        self.authorize_sentinel_token = ""
+        self.password_sentinel_token = ""
+        self.signup_verification_mode = ""
 
     def close(self) -> None:
         self.session.close()
@@ -557,7 +578,6 @@ class PlatformRegistrar:
             "auth_session_logging_id": str(uuid.uuid4()),
             "ext-passkey-client-capabilities": "0111",
             "screen_hint": "login_or_signup",
-            "login_hint": email,
         })
         signin_url = f"{chatgpt_base}/api/auth/signin/openai?{query}"
         signin_headers = {
@@ -578,7 +598,7 @@ class PlatformRegistrar:
             signin_url,
             data={"callbackUrl": f"{chatgpt_base}/", "csrfToken": csrf_token, "json": "true"},
             headers=signin_headers,
-            allow_redirects=True,
+            allow_redirects=False,
             verify=False,
         )
         signin_data = _response_json(signin_resp) if signin_resp is not None else {}
@@ -586,22 +606,42 @@ class PlatformRegistrar:
         if signin_resp is None or signin_resp.status_code != 200 or not authorize_url:
             raise RuntimeError(error or f"chatgpt_signin_http_{getattr(signin_resp, 'status_code', 'unknown')}")
 
-        authorize_headers = _headers_with_clearance(
-            self._navigate_headers(f"{chatgpt_base}/"),
-            authorize_url,
-            self.proxy,
-            self.clearance_user_agent,
-        )
-        resp, error = request_with_local_retry(
-            self.session,
-            "get",
-            authorize_url,
-            headers=authorize_headers,
-            allow_redirects=True,
-            verify=False,
-        )
+        def authorize():
+            authorize_headers = _headers_with_clearance(
+                self._navigate_headers(f"{chatgpt_base}/auth/login"),
+                authorize_url,
+                self.proxy,
+                self.clearance_user_agent,
+            )
+            return request_with_local_retry(
+                self.session,
+                "get",
+                authorize_url,
+                headers=authorize_headers,
+                allow_redirects=True,
+                verify=False,
+            )
+
+        resp, error = authorize()
+        if _is_cloudflare_challenge(resp):
+            bundle = self._refresh_cloudflare_clearance(auth_base, index)
+            if bundle is None:
+                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+            resp, error = authorize()
         if resp is None or resp.status_code != 200:
             raise RuntimeError(error or f"chatgpt_authorize_http_{getattr(resp, 'status_code', 'unknown')}")
+        parsed_authorize = urlparse(authorize_url)
+        try:
+            cookie_device_id = str(self.session.cookies.get("oai-did", "") or "").strip()
+        except Exception:
+            cookie_device_id = ""
+        query_device_id = str((parse_qs(parsed_authorize.query).get("device_id") or [""])[0]).strip()
+        self.device_id = cookie_device_id or query_device_id or self.device_id
+        for domain in (".auth.openai.com", "auth.openai.com"):
+            try:
+                self.session.cookies.set("oai-did", self.device_id, domain=domain)
+            except Exception:
+                continue
         step(index, f"ChatGPT authorize 完成 url={str(getattr(resp, 'url', '') or '')[:160]}")
 
     @staticmethod
@@ -732,6 +772,8 @@ class PlatformRegistrar:
         target_url = str(continue_url or "").strip()
         if not target_url:
             return
+        if target_url.startswith("/"):
+            target_url = f"{auth_base}{target_url}"
         step(index, "开始 authorize continue")
         headers = _headers_with_clearance(self._navigate_headers(referer), target_url, self.proxy, self.clearance_user_agent)
         resp, error = request_with_local_retry(self.session, "get", target_url, headers=headers, allow_redirects=True, verify=False)
@@ -748,11 +790,88 @@ class PlatformRegistrar:
             raise RuntimeError(error or f"authorize_continue_http_{getattr(resp, 'status_code', 'unknown')}, {debug}")
         step(index, f"authorize continue 完成 url={str(getattr(resp, 'url', '') or '')[:160]}")
 
+    def _authorize_signup(self, email: str, index: int) -> tuple[str, str]:
+        self._ensure_active()
+        step(index, "提交 ChatGPT 注册邮箱")
+        url = f"{auth_base}/api/accounts/authorize/continue"
+
+        def submit():
+            sentinel_token = build_sentinel_token(self.session, self.device_id, "authorize_continue")
+            self.authorize_sentinel_token = sentinel_token
+            headers = self._json_headers(f"{auth_base}/create-account")
+            headers["openai-sentinel-token"] = sentinel_token
+            headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+            return request_with_local_retry(
+                self.session,
+                "post",
+                url,
+                json={"username": {"value": email, "kind": "email"}, "screen_hint": "signup"},
+                headers=headers,
+                allow_redirects=False,
+                verify=False,
+            )
+
+        resp, error = submit()
+        if _is_cloudflare_challenge(resp):
+            bundle = self._refresh_cloudflare_clearance(auth_base, index)
+            if bundle is None:
+                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+            resp, error = submit()
+        if resp is None or resp.status_code != 200:
+            raise RuntimeError(
+                error
+                or f"authorize_signup_http_{getattr(resp, 'status_code', 'unknown')}, "
+                f"{_response_debug_detail(resp, 400)}"
+            )
+
+        data = _response_json(resp)
+        page = data.get("page") if isinstance(data.get("page"), dict) else {}
+        payload = page.get("payload") if isinstance(page.get("payload"), dict) else {}
+        page_type = str(page.get("type") or "").strip()
+        continue_url = _extract_continue_url(data)
+        page_mode = {
+            "create_account_password": "password",
+            "email_otp_verification": "otp",
+        }.get(page_type)
+        continue_mode = {
+            "/create-account/password": "password",
+            "/email-verification": "otp",
+        }.get(_url_path(continue_url))
+        if page_mode and continue_mode and page_mode != continue_mode:
+            raise RuntimeError(
+                f"authorize_signup_state_conflict: page_type={page_type}, continue_path={_url_path(continue_url)}"
+            )
+        mode = page_mode or continue_mode
+        if mode not in {"password", "otp"}:
+            raise RuntimeError(
+                f"authorize_signup_unknown_state: page_type={page_type or '?'}, "
+                f"continue_path={_url_path(continue_url) or '?'}"
+            )
+
+        verification_mode = str(payload.get("email_verification_mode") or "").strip().lower()
+        self.signup_verification_mode = verification_mode
+        if mode == "password":
+            self._follow_authorize_continue(
+                continue_url or f"{auth_base}/create-account/password",
+                f"{auth_base}/create-account",
+                index,
+            )
+        step(
+            index,
+            f"ChatGPT 注册邮箱状态 mode={mode}, verification_mode={verification_mode or 'none'}",
+        )
+        return mode, verification_mode
+
     def _register_user(self, email: str, password: str, index: int) -> None:
         step(index, "开始提交注册密码")
         url = f"{auth_base}/api/accounts/user/register"
         headers = self._json_headers(f"{auth_base}/create-account/password")
-        headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "username_password_create")
+        self.password_sentinel_token = build_sentinel_token(
+            self.session,
+            self.device_id,
+            "username_password_create",
+        )
+        headers["openai-sentinel-token"] = self.password_sentinel_token
         headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
         resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers, verify=False)
         if _is_cloudflare_challenge(resp):
@@ -760,7 +879,12 @@ class PlatformRegistrar:
             if bundle is None:
                 raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
             headers = self._json_headers(f"{auth_base}/create-account/password")
-            headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "username_password_create")
+            self.password_sentinel_token = build_sentinel_token(
+                self.session,
+                self.device_id,
+                "username_password_create",
+            )
+            headers["openai-sentinel-token"] = self.password_sentinel_token
             headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
             resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers, verify=False)
             if _is_cloudflare_challenge(resp):
@@ -785,19 +909,77 @@ class PlatformRegistrar:
             except Exception as exc:
                 step(index, f"邮箱基线记录失败，继续发送验证码: {str(exc)[:160]}", "yellow")
         url = f"{auth_base}/api/accounts/email-otp/send"
-        headers = _headers_with_clearance(self._navigate_headers(f"{auth_base}/create-account/password"), url, self.proxy, self.clearance_user_agent)
+        if not self.password_sentinel_token:
+            raise RuntimeError("send_otp_missing_password_sentinel")
+        headers = self._json_headers(f"{auth_base}/create-account/password")
+        headers["openai-sentinel-token"] = self.password_sentinel_token
+        headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
         resp, error = request_with_local_retry(self.session, "get", url, headers=headers, allow_redirects=True, verify=False)
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
                 raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
-            headers = _headers_with_clearance(self._navigate_headers(f"{auth_base}/create-account/password"), url, self.proxy, self.clearance_user_agent)
+            headers = self._json_headers(f"{auth_base}/create-account/password")
+            headers["openai-sentinel-token"] = self.password_sentinel_token
+            headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
             resp, error = request_with_local_retry(self.session, "get", url, headers=headers, allow_redirects=True, verify=False)
             if _is_cloudflare_challenge(resp):
                 raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
         if resp is None or resp.status_code not in (200, 302):
             raise RuntimeError(error or f"send_otp_http_{getattr(resp, 'status_code', 'unknown')}")
         step(index, "发送验证码完成")
+
+    def _resend_signup_otp(self, index: int, mailbox: dict[str, Any]) -> None:
+        self._ensure_active()
+        if not self.authorize_sentinel_token:
+            raise RuntimeError("resend_otp_missing_authorize_sentinel")
+        try:
+            mail_provider.prepare_code_baseline(_mail_config(self.proxy), mailbox)
+            step(index, "重发验证码前邮箱基线已记录")
+        except Exception as exc:
+            step(index, f"邮箱基线记录失败，继续重发验证码: {str(exc)[:160]}", "yellow")
+
+        step(index, "开始重发注册验证码")
+        url = f"{auth_base}/api/accounts/email-otp/resend"
+
+        def submit():
+            headers = self._json_headers(f"{auth_base}/email-verification")
+            headers["openai-sentinel-token"] = self.authorize_sentinel_token
+            headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+            return request_with_local_retry(
+                self.session,
+                "post",
+                url,
+                retry_attempts=1,
+                headers=headers,
+                allow_redirects=False,
+                verify=False,
+            )
+
+        resp, error = submit()
+        if _is_cloudflare_challenge(resp):
+            bundle = self._refresh_cloudflare_clearance(auth_base, index)
+            if bundle is None:
+                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+            resp, error = submit()
+        if resp is None or resp.status_code != 200:
+            raise RuntimeError(
+                error
+                or f"resend_otp_http_{getattr(resp, 'status_code', 'unknown')}, "
+                f"{_response_debug_detail(resp, 400)}"
+            )
+
+        data = _response_json(resp)
+        error_data = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error_data, dict):
+            error_message = str(error_data.get("message") or error_data.get("code") or "").strip()
+        else:
+            error_message = str(error_data or "").strip()
+        if not error_message and data.get("success") is False:
+            error_message = str(data.get("message") or "unknown_error").strip()
+        if error_message:
+            raise RuntimeError(f"resend_otp_rejected: {error_message}")
+        step(index, "重发注册验证码完成")
 
     def _validate_otp(self, code: str, index: int) -> None:
         step(index, "开始校验验证码")
@@ -906,14 +1088,27 @@ class PlatformRegistrar:
         label = str(mailbox.get("label") or "")
         step(index, f"邮箱创建完成[{label}]: {email}")
         try:
-            password = _random_password()
+            password = ""
             first_name, last_name = _random_name()
             self._ensure_active()
             self._chatgpt_authorize(email, index)
             self._ensure_active()
-            self._register_user(email, password, index)
-            self._ensure_active()
-            self._send_otp(index, mailbox)
+            signup_mode, verification_mode = self._authorize_signup(email, index)
+            if signup_mode == "password":
+                password = _random_password()
+                self._ensure_active()
+                self._register_user(email, password, index)
+                self._ensure_active()
+                self._send_otp(index, mailbox)
+            else:
+                if verification_mode == "passwordless_login":
+                    raise RuntimeError("signup_email_already_registered")
+                if verification_mode != "passwordless_signup":
+                    raise RuntimeError(
+                        "signup_otp_mode_unconfirmed: "
+                        f"email_verification_mode={verification_mode or 'unknown'}"
+                    )
+                self._resend_signup_otp(index, mailbox)
             self._validate_mailbox_otp(mailbox, index)
             self._ensure_active()
             self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)

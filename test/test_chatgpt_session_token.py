@@ -38,6 +38,7 @@ class ChatGPTSessionTokenRegistrationTests(unittest.TestCase):
     def test_registration_keeps_chatgpt_and_platform_tokens_separate(self) -> None:
         registrar = openai_register.PlatformRegistrar("")
         registrar._chatgpt_authorize = mock.Mock()
+        registrar._authorize_signup = mock.Mock(return_value=("password", ""))
         registrar._register_user = mock.Mock()
         registrar._send_otp = mock.Mock()
         registrar._validate_mailbox_otp = mock.Mock()
@@ -71,6 +72,7 @@ class ChatGPTSessionTokenRegistrationTests(unittest.TestCase):
     def test_registration_keeps_chatgpt_session_when_platform_oauth_fails(self) -> None:
         registrar = openai_register.PlatformRegistrar("")
         registrar._chatgpt_authorize = mock.Mock()
+        registrar._authorize_signup = mock.Mock(return_value=("password", ""))
         registrar._register_user = mock.Mock()
         registrar._send_otp = mock.Mock()
         registrar._validate_mailbox_otp = mock.Mock()
