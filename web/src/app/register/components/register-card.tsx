@@ -491,7 +491,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
               ))}
             </div>
             <div className="grid grid-cols-3 gap-2">
-              <Button className="h-10 rounded-xl bg-stone-950 px-3 text-white hover:bg-stone-800" onClick={() => void toggle()} disabled={isSaving || (!config.enabled && Boolean(newRegister?.enabled))}>
+              <Button className="h-10 rounded-xl bg-stone-950 px-3 text-white hover:bg-stone-800" onClick={() => void toggle()} disabled={isSaving}>
                 {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : config.enabled ? <Square className="size-4" /> : <Play className="size-4" />}
                 {config.enabled ? "停止" : "启动"}
               </Button>
@@ -590,7 +590,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
           </div>
 
           <div className="grid grid-cols-2 gap-2">
-            <Button className="h-10 rounded-xl bg-amber-500 px-3 font-semibold text-stone-950 hover:bg-amber-400" onClick={() => void toggleNewRegister()} disabled={isSavingNew || !newRegister || (!newRegister.enabled && config.enabled)}>
+            <Button className="h-10 rounded-xl bg-amber-500 px-3 font-semibold text-stone-950 hover:bg-amber-400" onClick={() => void toggleNewRegister()} disabled={isSavingNew || !newRegister}>
               {isSavingNew ? <LoaderCircle className="size-4 animate-spin" /> : newRegister?.enabled ? <Square className="size-4" /> : <Play className="size-4" />}
               {newRegister?.enabled ? "停止新注册" : "启动新注册"}
             </Button>

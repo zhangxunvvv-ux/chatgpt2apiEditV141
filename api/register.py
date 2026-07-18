@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -58,8 +58,6 @@ def create_router() -> APIRouter:
     @router.post("/api/register/start")
     async def start_register(body: RegisterConfigRequest | None = None, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        if new_register_service.get().get("enabled"):
-            raise HTTPException(status_code=409, detail="请先停止新注册模块")
         updates = body.model_dump(exclude_none=True) if body is not None else None
         return {"register": register_service.start(updates)}
 
@@ -101,8 +99,6 @@ def create_router() -> APIRouter:
     @router.post("/api/register/new/start")
     async def start_new_register(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        if register_service.get().get("enabled"):
-            raise HTTPException(status_code=409, detail="请先停止原注册模块")
         new_register_service.start(register_service.shared_config_snapshot())
         return {"register": new_register_snapshot()}
 
