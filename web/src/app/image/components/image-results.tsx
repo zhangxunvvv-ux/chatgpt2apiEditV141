@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useEffect, useRef, useState } from "react";
-import { Clock3, Download, EyeOff, FolderPlus, LoaderCircle, RotateCcw, Sparkles, Square, Trash2 } from "lucide-react";
+import { BookmarkPlus, Clock3, Download, EyeOff, FolderPlus, LoaderCircle, RotateCcw, Sparkles, Square, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -19,11 +19,12 @@ type ImageResultsProps = {
   onOpenLightbox: (images: ImageLightboxItem[], index: number) => void;
   onContinueEdit: (conversationId: string, image: StoredImage | StoredReferenceImage) => void;
   onDeletePrompt: (conversationId: string, turnId: string) => void;
+  onSavePrompt: (conversationId: string, turnId: string) => void | Promise<void>;
   onDeleteResults: (conversationId: string, turnId: string) => void;
   onReuseTurnConfig: (conversationId: string, turnId: string) => void | Promise<void>;
   onRegenerateTurn: (conversationId: string, turnId: string) => void | Promise<void>;
   onRetryImage: (conversationId: string, turnId: string, imageId: string) => void | Promise<void>;
-  onAddImageToMaterials: (image: StoredImage, index: number) => void | Promise<void>;
+  onAddImageToMaterials: (image: StoredImage, index: number, prompt: string) => void | Promise<void>;
   onTimeoutRetryContinue: (conversationId: string, turnId: string, taskId: string) => void | Promise<void>;
   onStopImage: (conversationId: string, turnId: string, taskId: string) => void | Promise<void>;
   onDismissErrors: (conversationId: string, turnId: string) => void | Promise<void>;
@@ -91,6 +92,7 @@ export function ImageResults({
   onOpenLightbox,
   onContinueEdit,
   onDeletePrompt,
+  onSavePrompt,
   onDeleteResults,
   onReuseTurnConfig,
   onRegenerateTurn,
@@ -203,6 +205,15 @@ export function ImageResults({
                   <div className="mt-2 flex flex-wrap justify-end gap-1.5">
                     <button
                       type="button"
+                      onClick={() => void onSavePrompt(selectedConversation.id, turn.id)}
+                      className="inline-flex items-center gap-1 rounded-xl bg-stone-100 px-2.5 py-1 text-[11px] font-medium text-stone-600 transition hover:bg-stone-200 hover:text-stone-900"
+                      title="一键保存到提示词库"
+                    >
+                      <BookmarkPlus className="size-3" />
+                      存为提示词
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => void onReuseTurnConfig(selectedConversation.id, turn.id)}
                       className="inline-flex items-center gap-1 rounded-xl bg-stone-100 px-2.5 py-1 text-[11px] font-medium text-stone-600 transition hover:bg-stone-200 hover:text-stone-900"
                     >
@@ -312,7 +323,7 @@ export function ImageResults({
                                   variant="outline"
                                   size="icon"
                                   className="size-8 rounded-xl border-stone-200 bg-white text-stone-600 shadow-none hover:bg-stone-50 hover:text-stone-900 dark:border-white/10 dark:bg-stone-900"
-                                  onClick={() => void onAddImageToMaterials(image, index)}
+                                  onClick={() => void onAddImageToMaterials(image, index, turn.prompt)}
                                   aria-label="加入素材库"
                                   title="加入素材库"
                                 >

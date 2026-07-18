@@ -21,6 +21,7 @@ import {
 import { Button } from "@/components/ui/button";
 import {
   createMaterialFromBase64,
+  createPromptLibraryItem,
   createImageEditTask,
   createImageGenerationTask,
   fetchAccounts,
@@ -162,6 +163,12 @@ function dataUrlToFile(dataUrl: string, fileName: string, mimeType?: string) {
     bytes[index] = binary.charCodeAt(index);
   }
   return new File([bytes], fileName, { type: mimeType || matchedMimeType || "image/png" });
+}
+
+function buildLibraryTitle(value: string, fallback: string) {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (!normalized) return fallback;
+  return normalized.length > 28 ? `${normalized.slice(0, 28)}...` : normalized;
 }
 
 function createOpaqueMaskFile(fileName: string) {
@@ -1359,12 +1366,48 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     [],
   );
 
-  const handleAddImageToMaterials = useCallback(async (image: StoredImage, index: number) => {
+  const handleSaveTurnPrompt = useCallback(async (conversationId: string, turnId: string) => {
+    const conversation = conversationsRef.current.find((item) => item.id === conversationId);
+    const turn = conversation?.turns.find((item) => item.id === turnId);
+    const content = turn?.prompt.trim() || "";
+    if (!conversation || !turn || !content) {
+      toast.error("没有可保存的提示词");
+      return;
+    }
+
+    const existing = promptLibraryItems.find((item) => item.content.trim() === content);
+    if (existing) {
+      toast.info(`提示词已存在：${existing.name}`);
+      return;
+    }
+
+    try {
+      const response = await createPromptLibraryItem({
+        name: buildLibraryTitle(content, conversation.title || "生图提示词"),
+        type: "生图历史",
+        content,
+        note: `来自生图对话：${conversation.title || "未命名对话"}`,
+      });
+      setPromptLibraryItems(response.items);
+      toast.success(`已保存提示词：${response.item?.name || buildLibraryTitle(content, "生图提示词")}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "保存提示词失败";
+      toast.error(message);
+    }
+  }, [promptLibraryItems]);
+
+  const handleAddImageToMaterials = useCallback(async (image: StoredImage, index: number, prompt: string) => {
     try {
       const stamp = new Date();
-      const name = `生成结果 ${stamp.toLocaleString("zh-CN", { hour12: false })}`;
+      const name = buildLibraryTitle(prompt, `生成素材 ${stamp.toLocaleString("zh-CN", { hour12: false })}`);
       const filename = `generated-${stamp.getTime()}-${index + 1}.png`;
-      const note = image.revised_prompt ? `revised_prompt: ${image.revised_prompt}` : "";
+      const notes = [
+        prompt.trim() ? `原始提示词：${prompt.trim()}` : "",
+        image.revised_prompt?.trim() && image.revised_prompt.trim() !== prompt.trim()
+          ? `修订提示词：${image.revised_prompt.trim()}`
+          : "",
+      ].filter(Boolean);
+      const note = notes.join("\n\n");
 
       const response = image.b64_json
         ? await createMaterialFromBase64({
@@ -1390,7 +1433,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         throw new Error("未找到可保存的图片数据");
       }
       setMaterialLibraryItems(response.items);
-      toast.success("已加入素材库");
+      toast.success(`已加入素材库：${response.item.name}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "加入素材库失败";
       toast.error(message);
@@ -2085,6 +2128,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 onOpenLightbox={openLightbox}
                 onContinueEdit={handleContinueEdit}
                 onDeletePrompt={openDeletePromptConfirm}
+                onSavePrompt={handleSaveTurnPrompt}
                 onDeleteResults={openDeleteResultsConfirm}
                 onReuseTurnConfig={handleReuseTurnConfig}
                 onRegenerateTurn={handleRegenerateTurn}
