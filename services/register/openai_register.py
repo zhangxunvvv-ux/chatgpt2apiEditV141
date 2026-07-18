@@ -493,6 +493,9 @@ class PlatformRegistrar:
             "accept": "*/*",
             "accept-encoding": "gzip, deflate, br",
             "accept-language": "en-US,en;q=0.9",
+            # curl_cffi otherwise labels an empty POST as form-urlencoded;
+            # the browser omits this header, but the API rejects curl's default.
+            "content-type": "application/json",
             "origin": auth_base,
             "priority": "u=1, i",
             "referer": f"{auth_base}/email-verification",

@@ -341,7 +341,7 @@ class RegisterProxyRuntimeTests(unittest.TestCase):
         self.assertEqual(headers["sec-fetch-site"], "same-origin")
         self.assertIn("traceparent", headers)
         self.assertIn("tracestate", headers)
-        self.assertNotIn("content-type", headers)
+        self.assertEqual(headers["content-type"], "application/json")
         self.assertNotIn("oai-device-id", headers)
         self.assertNotIn("openai-sentinel-token", headers)
 
