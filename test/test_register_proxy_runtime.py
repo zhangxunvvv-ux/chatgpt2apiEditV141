@@ -122,7 +122,7 @@ class RegisterProxyRuntimeTests(unittest.TestCase):
 
         self.assertFalse(openai_register._is_cloudflare_challenge(response))
 
-    def test_chatgpt_authorize_bootstraps_without_login_hint_and_keeps_device_id(self):
+    def test_chatgpt_authorize_keeps_login_hint_for_legacy_password_flow(self):
         fake_proxy = FakeProxySettings()
         session = FakeSession()
         request_calls = []
@@ -149,42 +149,9 @@ class RegisterProxyRuntimeTests(unittest.TestCase):
             registrar._chatgpt_authorize("user@example.com", 1)
 
         signin = request_calls[1]
-        self.assertEqual(signin["url"], "https://chatgpt.com/api/auth/signin/openai")
-        self.assertNotIn("login_hint", signin["url"])
-        self.assertEqual(registrar.device_id, "browser-device")
-        self.assertTrue(any(item["name"] == "oai-did" and item["value"] == "browser-device" for item in session.cookies.items))
-
-    def test_authorize_signup_submits_browser_payload_and_selects_password_branch(self):
-        fake_proxy = FakeProxySettings()
-        request_calls = []
-
-        def fake_request(_session, method, url, retry_attempts=3, **kwargs):
-            request_calls.append({"method": method, "url": url, **kwargs})
-            if method.lower() == "post":
-                return FakeResponse(
-                    status_code=200,
-                    json_data={
-                        "page": {"type": "create_account_password"},
-                        "continue_url": "https://auth.openai.com/create-account/password",
-                    },
-                ), ""
-            return FakeResponse(status_code=200, url="https://auth.openai.com/create-account/password"), ""
-
-        with patch.object(openai_register, "proxy_settings", fake_proxy), patch.object(
-            openai_register, "create_session", return_value=FakeSession()
-        ), patch.object(openai_register, "build_sentinel_token", return_value="sentinel-token"), patch.object(
-            openai_register, "request_with_local_retry", side_effect=fake_request
-        ):
-            registrar = openai_register.PlatformRegistrar(proxy="")
-            mode = registrar._authorize_signup("user@example.com", 1)
-
-        self.assertEqual(mode, "password")
-        self.assertEqual(request_calls[0]["json"], {
-            "username": {"value": "user@example.com", "kind": "email"},
-            "screen_hint": "signup",
-        })
-        self.assertEqual(request_calls[0]["headers"]["openai-sentinel-token"], "sentinel-token")
-        self.assertEqual([call["method"].lower() for call in request_calls], ["post", "get"])
+        self.assertTrue(signin["url"].startswith("https://chatgpt.com/api/auth/signin/openai?"))
+        self.assertIn("screen_hint=login_or_signup", signin["url"])
+        self.assertIn("login_hint=user%40example.com", signin["url"])
 
     def test_sentinel_token_keeps_oai_sc_cookie_for_following_registration_steps(self):
         session = FakeSession()
@@ -205,27 +172,7 @@ class RegisterProxyRuntimeTests(unittest.TestCase):
             session.cookies.items,
         )
 
-    def test_authorize_signup_accepts_direct_otp_branch_without_password_navigation(self):
-        fake_proxy = FakeProxySettings()
-        response = FakeResponse(
-            status_code=200,
-            json_data={
-                "page": {"type": "email_otp_verification"},
-                "continue_url": "https://auth.openai.com/email-verification",
-            },
-        )
-        with patch.object(openai_register, "proxy_settings", fake_proxy), patch.object(
-            openai_register, "create_session", return_value=FakeSession()
-        ), patch.object(openai_register, "build_sentinel_token", return_value="sentinel-token"), patch.object(
-            openai_register, "request_with_local_retry", return_value=(response, "")
-        ) as request:
-            registrar = openai_register.PlatformRegistrar(proxy="")
-            mode = registrar._authorize_signup("user@example.com", 1)
-
-        self.assertEqual(mode, "otp")
-        request.assert_called_once()
-
-    def test_register_keeps_existing_otp_pipeline_after_new_signup_transition(self):
+    def test_register_uses_legacy_password_then_existing_otp_pipeline(self):
         fake_proxy = FakeProxySettings()
         mailbox = {"address": "user@example.com", "label": "test", "provider": "test"}
         with patch.object(openai_register, "proxy_settings", fake_proxy), patch.object(
@@ -235,7 +182,6 @@ class RegisterProxyRuntimeTests(unittest.TestCase):
         ) as mark_result:
             registrar = openai_register.PlatformRegistrar(proxy="")
             registrar._chatgpt_authorize = mock.Mock()
-            registrar._authorize_signup = mock.Mock(return_value="password")
             registrar._register_user = mock.Mock()
             registrar._send_otp = mock.Mock()
             registrar._validate_mailbox_otp = mock.Mock()
@@ -244,42 +190,36 @@ class RegisterProxyRuntimeTests(unittest.TestCase):
                 return_value={"access_token": "chatgpt-token", "session_token": "", "cookie": ""}
             )
             registrar._platform_authorize = mock.Mock(side_effect=RuntimeError("optional oauth unavailable"))
+            flow = mock.Mock()
+            for method_name in (
+                "_chatgpt_authorize",
+                "_register_user",
+                "_send_otp",
+                "_validate_mailbox_otp",
+                "_create_account",
+                "_finish_chatgpt_registration",
+            ):
+                flow.attach_mock(getattr(registrar, method_name), method_name)
 
             result = registrar.register(1)
 
-        registrar._authorize_signup.assert_called_once_with("user@example.com", 1)
+        self.assertEqual(
+            [call[0] for call in flow.mock_calls],
+            [
+                "_chatgpt_authorize",
+                "_register_user",
+                "_send_otp",
+                "_validate_mailbox_otp",
+                "_create_account",
+                "_finish_chatgpt_registration",
+            ],
+        )
+        registrar._register_user.assert_called_once()
         registrar._send_otp.assert_called_once_with(1, mailbox)
         registrar._validate_mailbox_otp.assert_called_once_with(mailbox, 1)
         self.assertTrue(result["password"])
         self.assertEqual(result["access_token"], "chatgpt-token")
         mark_result.assert_called_once_with(mailbox, success=True)
-
-    def test_direct_otp_signup_skips_password_but_keeps_existing_otp_pipeline(self):
-        fake_proxy = FakeProxySettings()
-        mailbox = {"address": "user@example.com", "label": "test", "provider": "test"}
-        with patch.object(openai_register, "proxy_settings", fake_proxy), patch.object(
-            openai_register, "create_session", return_value=FakeSession()
-        ), patch.object(openai_register, "create_mailbox", return_value=mailbox), patch.object(
-            openai_register.mail_provider, "mark_mailbox_result"
-        ):
-            registrar = openai_register.PlatformRegistrar(proxy="")
-            registrar._chatgpt_authorize = mock.Mock()
-            registrar._authorize_signup = mock.Mock(return_value="otp")
-            registrar._register_user = mock.Mock()
-            registrar._send_otp = mock.Mock()
-            registrar._validate_mailbox_otp = mock.Mock()
-            registrar._create_account = mock.Mock()
-            registrar._finish_chatgpt_registration = mock.Mock(
-                return_value={"access_token": "chatgpt-token", "session_token": "", "cookie": ""}
-            )
-            registrar._platform_authorize = mock.Mock(side_effect=RuntimeError("optional oauth unavailable"))
-
-            result = registrar.register(1)
-
-        registrar._register_user.assert_not_called()
-        registrar._send_otp.assert_called_once_with(1, mailbox)
-        registrar._validate_mailbox_otp.assert_called_once_with(mailbox, 1)
-        self.assertEqual(result["password"], "")
 
     def test_cloudflare_challenge_refreshes_clearance_and_retries_once_with_matching_headers(self):
         bundle = ClearanceBundle(

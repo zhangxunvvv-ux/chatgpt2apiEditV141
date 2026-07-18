@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from curl_cffi import requests
 
@@ -63,6 +63,10 @@ print_lock = threading.Lock()
 stats_lock = threading.Lock()
 stats = {"done": 0, "success": 0, "fail": 0, "start_time": 0.0}
 register_log_sink = None
+
+
+class RegistrationStopped(RuntimeError):
+    pass
 
 common_headers = {
     "accept": "application/json",
@@ -261,8 +265,12 @@ def create_mailbox(username: str | None = None, register_proxy: str = "") -> dic
     return mail_provider.create_mailbox(_mail_config(register_proxy), username)
 
 
-def wait_for_code(mailbox: dict, register_proxy: str = "") -> str | None:
-    return mail_provider.wait_for_code(_mail_config(register_proxy), mailbox)
+def wait_for_code(
+    mailbox: dict,
+    register_proxy: str = "",
+    stop_event: threading.Event | None = None,
+) -> str | None:
+    return mail_provider.wait_for_code(_mail_config(register_proxy), mailbox, stop_event=stop_event)
 
 
 def build_sentinel_token(session: requests.Session, device_id: str, flow: str) -> str:
@@ -389,28 +397,6 @@ def extract_oauth_callback_params_from_url(url: str) -> dict[str, str] | None:
     return {"code": code, "state": str((params.get("state") or [""])[0]).strip(), "scope": str((params.get("scope") or [""])[0]).strip()}
 
 
-def _extract_continue_url(data: dict[str, Any] | None) -> str:
-    if not isinstance(data, dict):
-        return ""
-    direct = str(data.get("continue_url") or data.get("continueUrl") or "").strip()
-    if direct:
-        return direct
-    page = data.get("page") if isinstance(data.get("page"), dict) else {}
-    payload = page.get("payload") if isinstance(page.get("payload"), dict) else {}
-    return str(payload.get("continue_url") or payload.get("continueUrl") or "").strip()
-
-
-def _absolute_auth_url(url: str) -> str:
-    return urljoin(f"{auth_base}/", str(url or "").strip())
-
-
-def _url_path(url: str) -> str:
-    try:
-        return urlparse(_absolute_auth_url(url)).path.rstrip("/") or "/"
-    except Exception:
-        return ""
-
-
 def request_platform_oauth_token(session: requests.Session, code: str, code_verifier: str) -> dict | None:
     headers = {
         "accept": "application/json",
@@ -450,8 +436,9 @@ def request_platform_oauth_token(session: requests.Session, code: str, code_veri
 
 
 class PlatformRegistrar:
-    def __init__(self, proxy: str = "") -> None:
+    def __init__(self, proxy: str = "", stop_event: threading.Event | None = None) -> None:
         self.proxy = str(proxy or "").strip()
+        self.stop_event = stop_event
         self.session = create_session(self.proxy)
         self.clearance_user_agent = ""
         self.clearance_failure_reason = ""
@@ -462,6 +449,10 @@ class PlatformRegistrar:
 
     def close(self) -> None:
         self.session.close()
+
+    def _ensure_active(self) -> None:
+        if self.stop_event is not None and self.stop_event.is_set():
+            raise RegistrationStopped("registration_run_stopped")
 
     def _navigate_headers(self, referer: str = "") -> dict[str, str]:
         headers = dict(navigate_headers)
@@ -532,123 +523,85 @@ class PlatformRegistrar:
         step(index, "ChatGPT 会话初始化完成")
 
     def _chatgpt_authorize(self, email: str, index: int) -> None:
-        """Initialize the browser-backed ChatGPT signup challenge.
-
-        The email is submitted by ``_authorize_signup``. Keeping it out of the
-        NextAuth bootstrap avoids mixing login hints with a fresh signup state.
-        """
         self._boot_chatgpt_session(index)
-
-        def begin_signin() -> tuple[str, object | None, str]:
-            csrf_url = f"{chatgpt_base}/api/auth/csrf"
-            csrf_headers = _headers_with_clearance(
-                {
-                    "accept": "application/json",
-                    "referer": f"{chatgpt_base}/auth/login",
-                    "sec-fetch-dest": "empty",
-                    "sec-fetch-mode": "cors",
-                    "sec-fetch-site": "same-origin",
-                    "user-agent": user_agent,
-                },
-                csrf_url,
-                self.proxy,
-                self.clearance_user_agent,
-            )
-            csrf_resp, csrf_error = request_with_local_retry(
-                self.session,
-                "get",
-                csrf_url,
-                headers=csrf_headers,
-                verify=False,
-            )
-            csrf_token = str(_response_json(csrf_resp).get("csrfToken") or "").strip()
-            if csrf_resp is None or csrf_resp.status_code != 200 or not csrf_token:
-                raise RuntimeError(
-                    csrf_error
-                    or f"chatgpt_csrf_http_{getattr(csrf_resp, 'status_code', 'unknown')}, "
-                    f"{_response_debug_detail(csrf_resp, 400)}"
-                )
-
-            signin_url = f"{chatgpt_base}/api/auth/signin/openai"
-            signin_headers = _headers_with_clearance(
-                {
-                    "accept": "application/json",
-                    "content-type": "application/x-www-form-urlencoded",
-                    "origin": chatgpt_base,
-                    "referer": f"{chatgpt_base}/auth/login",
-                    "user-agent": user_agent,
-                },
-                signin_url,
-                self.proxy,
-                self.clearance_user_agent,
-            )
-            signin_resp, signin_error = request_with_local_retry(
-                self.session,
-                "post",
-                signin_url,
-                data={"csrfToken": csrf_token, "callbackUrl": f"{chatgpt_base}/", "json": "true"},
-                headers=signin_headers,
-                verify=False,
-            )
-            return str(_response_json(signin_resp).get("url") or "").strip(), signin_resp, signin_error
-
-        authorize_url, signin_resp, error = begin_signin()
-        parsed = urlparse(authorize_url)
-        if parsed.netloc == "chatgpt.com" and parsed.path == "/api/auth/signin":
-            authorize_url, signin_resp, error = begin_signin()
-            parsed = urlparse(authorize_url)
-        valid_authorize_url = (
-            parsed.scheme == "https"
-            and parsed.netloc == "auth.openai.com"
-            and "/api/accounts/authorize" in parsed.path
+        csrf_url = f"{chatgpt_base}/api/auth/csrf"
+        csrf_browser_headers = {
+            "accept": "application/json",
+            "referer": f"{chatgpt_base}/",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "user-agent": user_agent,
+        }
+        csrf_headers = _headers_with_clearance(
+            csrf_browser_headers,
+            csrf_url,
+            self.proxy,
+            self.clearance_user_agent,
         )
-        if signin_resp is None or signin_resp.status_code != 200 or not valid_authorize_url:
-            raise RuntimeError(
-                error
-                or f"chatgpt_signin_http_{getattr(signin_resp, 'status_code', 'unknown')}, "
-                f"authorize_url={authorize_url[:240]}, {_response_debug_detail(signin_resp, 400)}"
-            )
+        csrf_resp, error = request_with_local_retry(
+            self.session,
+            "get",
+            csrf_url,
+            headers=csrf_headers,
+            verify=False,
+        )
+        csrf_data = _response_json(csrf_resp) if csrf_resp is not None else {}
+        csrf_token = str(csrf_data.get("csrfToken") or "").strip()
+        if csrf_resp is None or csrf_resp.status_code != 200 or not csrf_token:
+            raise RuntimeError(error or f"chatgpt_csrf_http_{getattr(csrf_resp, 'status_code', 'unknown')}")
 
-        def authorize():
-            headers = _headers_with_clearance(
-                self._navigate_headers(f"{chatgpt_base}/auth/login"),
-                authorize_url,
-                self.proxy,
-                self.clearance_user_agent,
-            )
-            return request_with_local_retry(
-                self.session,
-                "get",
-                authorize_url,
-                headers=headers,
-                allow_redirects=True,
-                verify=False,
-            )
+        query = urlencode({
+            "prompt": "login",
+            "ext-oai-did": self.device_id,
+            "auth_session_logging_id": str(uuid.uuid4()),
+            "ext-passkey-client-capabilities": "0111",
+            "screen_hint": "login_or_signup",
+            "login_hint": email,
+        })
+        signin_url = f"{chatgpt_base}/api/auth/signin/openai?{query}"
+        signin_headers = {
+            "accept": "*/*",
+            "accept-language": "en-US,en;q=0.9",
+            "content-type": "application/x-www-form-urlencoded",
+            "origin": chatgpt_base,
+            "referer": f"{chatgpt_base}/",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "user-agent": user_agent,
+        }
+        signin_headers = _headers_with_clearance(signin_headers, signin_url, self.proxy, self.clearance_user_agent)
+        signin_resp, error = request_with_local_retry(
+            self.session,
+            "post",
+            signin_url,
+            data={"callbackUrl": f"{chatgpt_base}/", "csrfToken": csrf_token, "json": "true"},
+            headers=signin_headers,
+            allow_redirects=True,
+            verify=False,
+        )
+        signin_data = _response_json(signin_resp) if signin_resp is not None else {}
+        authorize_url = str(signin_data.get("url") or "").strip()
+        if signin_resp is None or signin_resp.status_code != 200 or not authorize_url:
+            raise RuntimeError(error or f"chatgpt_signin_http_{getattr(signin_resp, 'status_code', 'unknown')}")
 
-        resp, error = authorize()
-        if _is_cloudflare_challenge(resp):
-            bundle = self._refresh_cloudflare_clearance(auth_base, index)
-            if bundle is None:
-                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
-            resp, error = authorize()
+        authorize_headers = _headers_with_clearance(
+            self._navigate_headers(f"{chatgpt_base}/"),
+            authorize_url,
+            self.proxy,
+            self.clearance_user_agent,
+        )
+        resp, error = request_with_local_retry(
+            self.session,
+            "get",
+            authorize_url,
+            headers=authorize_headers,
+            allow_redirects=True,
+            verify=False,
+        )
         if resp is None or resp.status_code != 200:
-            raise RuntimeError(
-                error
-                or f"chatgpt_authorize_http_{getattr(resp, 'status_code', 'unknown')}, "
-                f"{_response_debug_detail(resp, 400)}"
-            )
-
-        device_id = ""
-        try:
-            device_id = str(self.session.cookies.get("oai-did", "") or "").strip()
-        except Exception:
-            pass
-        self.device_id = device_id or str((parse_qs(parsed.query).get("device_id") or [""])[0]).strip() or self.device_id
-        for domain in (".auth.openai.com", "auth.openai.com"):
-            try:
-                self.session.cookies.set("oai-did", self.device_id, domain=domain)
-            except Exception:
-                continue
+            raise RuntimeError(error or f"chatgpt_authorize_http_{getattr(resp, 'status_code', 'unknown')}")
         step(index, f"ChatGPT authorize 完成 url={str(getattr(resp, 'url', '') or '')[:160]}")
 
     @staticmethod
@@ -795,77 +748,6 @@ class PlatformRegistrar:
             raise RuntimeError(error or f"authorize_continue_http_{getattr(resp, 'status_code', 'unknown')}, {debug}")
         step(index, f"authorize continue 完成 url={str(getattr(resp, 'url', '') or '')[:160]}")
 
-    def _authorize_signup(self, email: str, index: int) -> str:
-        """Submit the email to the active authorize challenge.
-
-        This mirrors the browser's authorize/continue transition and returns
-        the upstream-selected registration branch. OTP polling and validation
-        remain owned by the existing project implementation.
-        """
-        step(index, "提交 ChatGPT 注册邮箱")
-        url = f"{auth_base}/api/accounts/authorize/continue"
-
-        def submit():
-            headers = self._json_headers(f"{auth_base}/create-account")
-            headers["openai-sentinel-token"] = build_sentinel_token(
-                self.session,
-                self.device_id,
-                "authorize_continue",
-            )
-            headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
-            return request_with_local_retry(
-                self.session,
-                "post",
-                url,
-                json={"username": {"value": email, "kind": "email"}, "screen_hint": "signup"},
-                headers=headers,
-                allow_redirects=False,
-                verify=False,
-            )
-
-        resp, error = submit()
-        if _is_cloudflare_challenge(resp):
-            bundle = self._refresh_cloudflare_clearance(auth_base, index)
-            if bundle is None:
-                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
-            resp, error = submit()
-        if resp is None or resp.status_code != 200:
-            raise RuntimeError(
-                error
-                or f"authorize_signup_http_{getattr(resp, 'status_code', 'unknown')}, "
-                f"{_response_debug_detail(resp, 400)}"
-            )
-
-        data = _response_json(resp)
-        page = data.get("page") if isinstance(data.get("page"), dict) else {}
-        page_type = str(page.get("type") or "").strip()
-        continue_url = _extract_continue_url(data)
-        page_mode = {
-            "create_account_password": "password",
-            "email_otp_verification": "otp",
-        }.get(page_type)
-        continue_mode = {
-            "/create-account/password": "password",
-            "/email-verification": "otp",
-        }.get(_url_path(continue_url))
-        if page_mode and continue_mode and page_mode != continue_mode:
-            raise RuntimeError(
-                f"authorize_signup_state_conflict: page_type={page_type}, continue_path={_url_path(continue_url)}"
-            )
-        mode = page_mode or continue_mode
-        if mode not in {"password", "otp"}:
-            raise RuntimeError(
-                f"authorize_signup_unknown_state: page_type={page_type or '?'}, continue_path={_url_path(continue_url) or '?'}"
-            )
-        if mode == "password":
-            self._follow_authorize_continue(
-                continue_url or f"{auth_base}/create-account/password",
-                f"{auth_base}/create-account",
-                index,
-            )
-        step(index, f"ChatGPT 注册邮箱提交完成，流程={mode}")
-        return mode
-
     def _register_user(self, email: str, password: str, index: int) -> None:
         step(index, "开始提交注册密码")
         url = f"{auth_base}/api/accounts/user/register"
@@ -894,6 +776,7 @@ class PlatformRegistrar:
         step(index, "提交注册密码完成")
 
     def _send_otp(self, index: int, mailbox: dict[str, Any] | None = None) -> None:
+        self._ensure_active()
         step(index, "开始发送验证码")
         if mailbox is not None:
             try:
@@ -932,8 +815,10 @@ class PlatformRegistrar:
         max_attempts = 4
         last_detail = ""
         for attempt in range(1, max_attempts + 1):
+            self._ensure_active()
             step(index, f"开始等待注册验证码（第 {attempt}/{max_attempts} 次）")
-            code = wait_for_code(mailbox, register_proxy=self.proxy)
+            code = wait_for_code(mailbox, register_proxy=self.proxy, stop_event=self.stop_event)
+            self._ensure_active()
             if not code:
                 if attempt >= max_attempts:
                     raise RuntimeError(last_detail or "等待注册验证码超时")
@@ -1010,8 +895,10 @@ class PlatformRegistrar:
         return tokens
 
     def register(self, index: int) -> dict:
+        self._ensure_active()
         step(index, "开始创建邮箱")
         mailbox = create_mailbox(register_proxy=self.proxy)
+        self._ensure_active()
         email = str(mailbox.get("address") or "").strip()
         if not email:
             mail_provider.release_mailbox(mailbox)
@@ -1019,15 +906,18 @@ class PlatformRegistrar:
         label = str(mailbox.get("label") or "")
         step(index, f"邮箱创建完成[{label}]: {email}")
         try:
+            password = _random_password()
             first_name, last_name = _random_name()
+            self._ensure_active()
             self._chatgpt_authorize(email, index)
-            signup_mode = self._authorize_signup(email, index)
-            password = _random_password() if signup_mode == "password" else ""
-            if password:
-                self._register_user(email, password, index)
+            self._ensure_active()
+            self._register_user(email, password, index)
+            self._ensure_active()
             self._send_otp(index, mailbox)
             self._validate_mailbox_otp(mailbox, index)
+            self._ensure_active()
             self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
+            self._ensure_active()
             chatgpt_session = self._finish_chatgpt_registration(index)
             tokens: dict = {}
             try:
@@ -1059,11 +949,11 @@ class PlatformRegistrar:
         }
 
 
-def worker(index: int) -> dict:
+def worker(index: int, stop_event: threading.Event | None = None, generation: int = 0) -> dict:
     start = time.time()
-    registrar = PlatformRegistrar(config["proxy"])
+    registrar = PlatformRegistrar(config["proxy"], stop_event=stop_event)
     try:
-        step(index, "任务启动")
+        step(index, f"任务启动 generation={generation}")
         result = registrar.register(index)
         cost = time.time() - start
         access_token = str(result["access_token"])
@@ -1076,13 +966,20 @@ def worker(index: int) -> dict:
             stats["success"] += 1
             avg = (time.time() - stats["start_time"]) / stats["success"]
         log(f'{result["email"]} 注册成功，本次耗时{cost:.1f}s，全局平均每个号注册耗时{avg:.1f}s', "green")
-        return {"ok": True, "index": index, "result": result}
+        return {"ok": True, "index": index, "generation": generation, "result": result}
+    except RegistrationStopped:
+        cost = time.time() - start
+        step(index, f"任务因运行代次停止，本次耗时{cost:.1f}s", "yellow")
+        return {"ok": False, "cancelled": True, "index": index, "generation": generation}
     except Exception as e:
         cost = time.time() - start
+        if stop_event is not None and stop_event.is_set():
+            step(index, f"任务因运行代次停止，本次耗时{cost:.1f}s", "yellow")
+            return {"ok": False, "cancelled": True, "index": index, "generation": generation}
         with stats_lock:
             stats["done"] += 1
             stats["fail"] += 1
         log(f"任务{index} 注册失败，本次耗时{cost:.1f}s，原因: {e}", "red")
-        return {"ok": False, "index": index, "error": str(e)}
+        return {"ok": False, "index": index, "generation": generation, "error": str(e)}
     finally:
         registrar.close()

@@ -127,6 +127,8 @@ class RegisterService:
         self._store_file = store_file
         self._lock = threading.RLock()
         self._runner: threading.Thread | None = None
+        self._generation = 0
+        self._stop_event = threading.Event()
         self._logs: list[dict] = []
         openai_register.register_log_sink = self._append_log
         self._config = self._load()
@@ -237,6 +239,9 @@ class RegisterService:
         self._merge_outlook_pools(updates)
         self._config = _normalize({**self._config, **updates})
         self._drop_mail_proxy()
+        self._apply_runtime_config_locked()
+
+    def _apply_runtime_config_locked(self) -> None:
         openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
 
     def update(self, updates: dict) -> dict:
@@ -249,10 +254,13 @@ class RegisterService:
         with self._lock:
             if updates:
                 self._apply_updates_locked(updates)
-            if self._runner and self._runner.is_alive():
-                self._config["enabled"] = True
-                self._save()
-                return self.get()
+            else:
+                self._apply_runtime_config_locked()
+            self._stop_event.set()
+            self._generation += 1
+            generation = self._generation
+            stop_event = threading.Event()
+            self._stop_event = stop_event
             self._config["enabled"] = True
             self._drop_mail_proxy()
             self._logs = []
@@ -270,6 +278,7 @@ class RegisterService:
                 )
             self._config["stats"] = {
                 "job_id": uuid.uuid4().hex,
+                "generation": generation,
                 "success": 0,
                 "fail": 0,
                 "done": 0,
@@ -283,18 +292,26 @@ class RegisterService:
                 "started_at": _now(),
                 "updated_at": _now(),
             }
-            openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": time.time()})
             self._save()
-            self._runner = threading.Thread(target=self._run, daemon=True, name="openai-register")
+            self._runner = threading.Thread(
+                target=self._run,
+                args=(generation, stop_event),
+                daemon=True,
+                name=f"openai-register-{generation}",
+            )
             self._runner.start()
-            self._append_log(f"注册任务启动，模式={self._config['mode']}，线程数={self._config['threads']}", "yellow")
+            self._append_log(
+                f"注册任务启动，generation={generation}，模式={self._config['mode']}，线程数={self._config['threads']}",
+                "yellow",
+            )
             return self.get()
 
     def stop(self) -> dict:
         with self._lock:
             self._config["enabled"] = False
+            self._stop_event.set()
             self._config["stats"]["updated_at"] = _now()
             self._save()
             self._append_log("已请求停止注册任务，正在等待当前运行任务结束", "yellow")
@@ -355,17 +372,33 @@ class RegisterService:
             "current_available": len(normal),
         }
 
-    def _is_enabled(self) -> bool:
+    def _is_current_generation(self, generation: int, stop_event: threading.Event) -> bool:
         with self._lock:
-            return bool(self._config.get("enabled"))
+            return self._generation == generation and self._stop_event is stop_event
 
-    def _target_reached(self, cfg: dict, successful: int, in_flight: int = 0) -> bool:
+    def _is_generation_active(self, generation: int, stop_event: threading.Event) -> bool:
+        with self._lock:
+            return (
+                self._generation == generation
+                and self._stop_event is stop_event
+                and bool(self._config.get("enabled"))
+                and not stop_event.is_set()
+            )
+
+    def _target_reached(
+        self,
+        cfg: dict,
+        successful: int,
+        in_flight: int,
+        generation: int,
+        stop_event: threading.Event,
+    ) -> bool:
         mode = str(cfg.get("mode") or "total")
         if mode == "total":
             # A failed attempt must not consume the requested successful-account count.
             return successful + in_flight >= int(cfg.get("total") or 1)
         metrics = self._pool_metrics()
-        self._bump(**metrics)
+        self._bump_generation(generation, stop_event, **metrics)
         if mode == "quota":
             reached = metrics["current_quota"] >= int(cfg.get("target_quota") or 1)
             self._append_log(f"检查号池：当前正常账号={metrics['current_available']}，当前剩余额度={metrics['current_quota']}，目标额度={cfg.get('target_quota')}，{'跳过注册' if reached else '继续注册'}", "yellow")
@@ -394,7 +427,14 @@ class RegisterService:
             self._config["stats"]["updated_at"] = _now()
             self._save()
 
-    def _run_loop(self) -> None:
+    def _bump_generation(self, generation: int, stop_event: threading.Event, **updates) -> bool:
+        with self._lock:
+            if self._generation != generation or self._stop_event is not stop_event:
+                return False
+            self._bump(**updates)
+            return True
+
+    def _run_loop(self, generation: int, stop_event: threading.Event) -> None:
         threads = int(self.get()["threads"])
         initial_stats = self.get().get("stats") or {}
         done = int(initial_stats.get("done") or 0)
@@ -407,13 +447,15 @@ class RegisterService:
             while True:
                 cfg = self.get()
                 while (
-                    self._is_enabled()
+                    self._is_generation_active(generation, stop_event)
                     and len(futures) < threads
-                    and not self._target_reached(cfg, success, len(futures))
+                    and not self._target_reached(cfg, success, len(futures), generation, stop_event)
                 ):
                     task_index += 1
-                    futures.add(executor.submit(openai_register.worker, task_index))
-                self._bump(
+                    futures.add(executor.submit(openai_register.worker, task_index, stop_event, generation))
+                self._bump_generation(
+                    generation,
+                    stop_event,
                     running=len(futures),
                     done=done,
                     success=success,
@@ -421,17 +463,29 @@ class RegisterService:
                     consecutive_failures=consecutive_failures,
                 )
                 if not futures:
-                    if not self._is_enabled():
+                    if not self._is_generation_active(generation, stop_event):
                         break
-                    if str(cfg.get("mode") or "total") == "total" and self._target_reached(cfg, success):
+                    if str(cfg.get("mode") or "total") == "total" and self._target_reached(
+                        cfg,
+                        success,
+                        0,
+                        generation,
+                        stop_event,
+                    ):
                         break
-                    time.sleep(max(1, int(cfg.get("check_interval") or 5)))
+                    if stop_event.wait(max(1, int(cfg.get("check_interval") or 5))):
+                        break
                     continue
                 finished, futures = wait(futures, return_when=FIRST_COMPLETED)
+                if not self._is_current_generation(generation, stop_event):
+                    continue
                 for future in finished:
-                    done += 1
                     try:
                         result = future.result()
+                        if isinstance(result, dict) and result.get("cancelled"):
+                            continue
+                        if isinstance(result, dict) and int(result.get("generation") or generation) != generation:
+                            continue
                         ok = bool(isinstance(result, dict) and result.get("ok"))
                     except Exception as error:
                         ok = False
@@ -439,20 +493,27 @@ class RegisterService:
                             f"注册工作线程异常（{type(error).__name__}），已计为失败并继续调度",
                             "red",
                         )
+                    done += 1
                     if ok:
                         success += 1
                         consecutive_failures = 0
                     else:
                         fail += 1
                         consecutive_failures += 1
-                self._bump(
+                self._bump_generation(
+                    generation,
+                    stop_event,
                     running=len(futures),
                     done=done,
                     success=success,
                     fail=fail,
                     consecutive_failures=consecutive_failures,
                 )
-        self._bump(
+        if not self._is_current_generation(generation, stop_event):
+            return
+        self._bump_generation(
+            generation,
+            stop_event,
             running=0,
             done=done,
             success=success,
@@ -463,28 +524,39 @@ class RegisterService:
             finished_at=_now(),
         )
         with self._lock:
+            if self._generation != generation or self._stop_event is not stop_event:
+                return
             self._config["enabled"] = False
+            stop_event.set()
             self._save()
         self._append_log(f"注册任务结束，成功{success}，失败{fail}", "yellow")
 
-    def _run(self) -> None:
-        while self._is_enabled():
+    def _run(self, generation: int, stop_event: threading.Event) -> None:
+        while self._is_generation_active(generation, stop_event):
             try:
-                self._run_loop()
+                self._run_loop(generation, stop_event)
                 return
             except Exception as error:
-                if not self._is_enabled():
+                if not self._is_generation_active(generation, stop_event):
                     break
                 snapshot = self.get()
                 stats = snapshot.get("stats") if isinstance(snapshot.get("stats"), dict) else {}
                 restarts = int(stats.get("scheduler_restarts") or 0) + 1
-                self._bump(running=0, scheduler_restarts=restarts, retry_at=None, pause_reason="")
+                self._bump_generation(
+                    generation,
+                    stop_event,
+                    running=0,
+                    scheduler_restarts=restarts,
+                    retry_at=None,
+                    pause_reason="",
+                )
                 self._append_log(
                     f"注册调度器异常（{type(error).__name__}），不会停止任务；1 秒后继续调度",
                     "red",
                 )
-                time.sleep(1)
-        self._bump(running=0, retry_at=None, pause_reason="")
+                if stop_event.wait(1):
+                    break
+        self._bump_generation(generation, stop_event, running=0, retry_at=None, pause_reason="")
 
 
 register_service = RegisterService(REGISTER_FILE)

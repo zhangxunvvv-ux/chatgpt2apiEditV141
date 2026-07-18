@@ -83,7 +83,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
             active = 0
             max_active = 0
 
-            def worker(index: int) -> dict:
+            def worker(index: int, _stop_event: threading.Event, generation: int) -> dict:
                 nonlocal active, max_active
                 with state_lock:
                     active += 1
@@ -93,7 +93,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
                 release.wait(5)
                 with state_lock:
                     active -= 1
-                return {"ok": True, "index": index}
+                return {"ok": True, "index": index, "generation": generation}
 
             with mock.patch.object(service, "_pool_metrics", return_value={"current_quota": 0, "current_available": 0}), mock.patch.object(
                 register_service_module.openai_register, "worker", side_effect=worker
@@ -123,9 +123,17 @@ class RegisterConcurrencyTests(unittest.TestCase):
             clear=False,
         ):
             service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
-            runner = mock.Mock()
-            runner.is_alive.return_value = True
-            service._runner = runner
+            first_started = threading.Event()
+            generations: list[int] = []
+
+            def worker(index: int, stop_event: threading.Event, generation: int) -> dict:
+                generations.append(generation)
+                if generation == 1:
+                    first_started.set()
+                    stop_event.wait(3)
+                    return {"ok": False, "cancelled": True, "index": index, "generation": generation}
+                return {"ok": True, "index": index, "generation": generation}
+
             providers = [
                 {
                     "type": "cloudflare_temp_email",
@@ -142,14 +150,60 @@ class RegisterConcurrencyTests(unittest.TestCase):
                 },
             ]
 
-            result = service.start({"mail": {"providers": providers}})
+            with mock.patch.object(
+                service,
+                "_pool_metrics",
+                return_value={"current_quota": 0, "current_available": 0},
+            ), mock.patch.object(register_service_module.openai_register, "worker", side_effect=worker):
+                first = service.start({"threads": 1, "total": 1, "mode": "total"})
+                self.assertEqual(first["stats"]["generation"], 1)
+                self.assertTrue(first_started.wait(1))
+                result = service.start(
+                    {"threads": 1, "total": 1, "mode": "total", "mail": {"providers": providers}}
+                )
+                self.assertEqual(result["stats"]["generation"], 2)
+                self.assertTrue(self.wait_until(lambda: not service.get()["enabled"], timeout=3))
 
-            self.assertTrue(result["enabled"])
             self.assertFalse(result["mail"]["providers"][0]["enable"])
             self.assertTrue(result["mail"]["providers"][1]["enable"])
             runtime_providers = register_service_module.openai_register.config["mail"]["providers"]
             self.assertFalse(runtime_providers[0]["enable"])
             self.assertTrue(runtime_providers[1]["enable"])
+            self.assertEqual(generations, [1, 2])
+            self.assertEqual(service.get()["stats"]["generation"], 2)
+            self.assertEqual(service.get()["stats"]["success"], 1)
+            self.assertEqual(service.get()["stats"]["fail"], 0)
+
+    def test_start_reapplies_stored_provider_config_before_launching_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
+            providers = [
+                {
+                    "type": "tempmail_lol",
+                    "enable": True,
+                    "api_key": "test-key",
+                    "domain": ["mail.example"],
+                }
+            ]
+            service.update({"threads": 1, "total": 1, "mode": "total", "mail": {"providers": providers}})
+            register_service_module.openai_register.config["mail"] = {
+                "providers": [{"type": "cloudflare_temp_email", "enable": True}]
+            }
+
+            with mock.patch.object(
+                service,
+                "_pool_metrics",
+                return_value={"current_quota": 0, "current_available": 0},
+            ), mock.patch.object(
+                register_service_module.openai_register,
+                "worker",
+                return_value={"ok": True, "generation": 1},
+            ):
+                service.start()
+                self.assertTrue(self.wait_until(lambda: not service.get()["enabled"], timeout=3))
+
+            runtime_providers = register_service_module.openai_register.config["mail"]["providers"]
+            self.assertEqual(runtime_providers, providers)
 
     def test_total_mode_counts_successes_instead_of_failed_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -163,7 +217,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
             )
 
             with mock.patch.object(service, "_pool_metrics", return_value={"current_quota": 0, "current_available": 0}), mock.patch.object(
-                register_service_module.openai_register, "worker", side_effect=lambda _index: next(results)
+                register_service_module.openai_register, "worker", side_effect=lambda *_args: next(results)
             ) as worker:
                 service.start(
                     {
@@ -185,7 +239,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
             service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
             attempt_times: list[float] = []
 
-            def worker(_index: int) -> dict:
+            def worker(_index: int, _stop_event: threading.Event, _generation: int) -> dict:
                 attempt_times.append(time.monotonic())
                 return {"ok": len(attempt_times) > 1, "error": "等待注册验证码超时"}
 
@@ -212,7 +266,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
             service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
             attempt_times: list[float] = []
 
-            def worker(_index: int) -> dict:
+            def worker(_index: int, _stop_event: threading.Event, _generation: int) -> dict:
                 attempt_times.append(time.monotonic())
                 if len(attempt_times) == 1:
                     return {"ok": False, "error": "user_register_http_400: account_creation_failed"}
@@ -241,7 +295,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
             service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
             attempt_times: list[float] = []
 
-            def worker(_index: int) -> dict:
+            def worker(_index: int, _stop_event: threading.Event, _generation: int) -> dict:
                 attempt_times.append(time.monotonic())
                 if len(attempt_times) == 1:
                     return {"ok": False, "error": "mail request failed: HTTP 429 Too Many Requests"}
@@ -270,7 +324,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
             service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
             attempted = threading.Event()
 
-            def fail(_index: int) -> dict:
+            def fail(_index: int, _stop_event: threading.Event, _generation: int) -> dict:
                 attempted.set()
                 return {"ok": False, "error": "HTTP 429 Too Many Requests"}
 
@@ -300,12 +354,12 @@ class RegisterConcurrencyTests(unittest.TestCase):
             calls = 0
             started_at = time.monotonic()
 
-            def flaky_run_loop() -> None:
+            def flaky_run_loop(generation: int, stop_event: threading.Event) -> None:
                 nonlocal calls
                 calls += 1
                 if calls == 1:
                     raise RuntimeError("temporary scheduler failure")
-                original_run_loop()
+                original_run_loop(generation, stop_event)
 
             with mock.patch.object(service, "_pool_metrics", return_value={"current_quota": 0, "current_available": 0}), mock.patch.object(
                 service, "_run_loop", side_effect=flaky_run_loop

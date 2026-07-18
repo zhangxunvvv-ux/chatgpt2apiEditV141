@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from email import message_from_bytes, message_from_string, policy
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
-from threading import Lock
+from threading import Event, Lock
 from typing import Any, Callable, TypeVar
 from curl_cffi import requests
 
@@ -433,16 +433,28 @@ class BaseMailProvider:
     def __init__(self, conf: dict, provider_ref: str = ""):
         self.conf = conf
         self.provider_ref = provider_ref
+        self.stop_event: Event | None = None
+
+    def _stopped(self) -> bool:
+        return bool(self.stop_event and self.stop_event.is_set())
+
+    def _poll_wait(self) -> bool:
+        seconds = max(0.2, self.conf["wait_interval"])
+        if self.stop_event is not None:
+            return self.stop_event.wait(seconds)
+        time.sleep(seconds)
+        return False
 
     def wait_for(self, mailbox: dict[str, Any], on_message: Callable[[dict[str, Any]], ResultT | None]) -> ResultT | None:
         deadline = time.monotonic() + self.conf["wait_timeout"]
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and not self._stopped():
             message = self.fetch_latest_message(mailbox)
             if message:
                 result = on_message(message)
                 if result is not None:
                     return result
-            time.sleep(max(0.2, self.conf["wait_interval"]))
+            if self._poll_wait():
+                break
         return None
 
     def wait_for_code(self, mailbox: dict[str, Any]) -> str | None:
@@ -586,7 +598,7 @@ class CloudflareTempMailProvider(BaseMailProvider):
         deadline = time.monotonic() + self.conf["wait_timeout"]
         scanned = boundary_filtered = no_code = last_batch = 0
 
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and not self._stopped():
             messages = self.fetch_recent_messages(mailbox)
             last_batch = len(messages)
             for message in messages:
@@ -607,7 +619,8 @@ class CloudflareTempMailProvider(BaseMailProvider):
                     seen_refs.add(ref)
                     return code
                 no_code += 1
-            time.sleep(max(0.2, self.conf["wait_interval"]))
+            if self._poll_wait():
+                break
 
         domain = str(mailbox.get("address") or "").partition("@")[2]
         _provider_log(
@@ -1274,7 +1287,7 @@ class TempMailLolProvider(BaseMailProvider):
                 f"boundary_filtered={boundary_filtered}, key_switches={key_switches}"
             )
 
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and not self._stopped():
             try:
                 data = self._request(
                     "GET",
@@ -1301,12 +1314,14 @@ class TempMailLolProvider(BaseMailProvider):
                     if fallback is not None:
                         api_key = fallback
                         key_switches += 1
-                time.sleep(max(0.2, self.conf["wait_interval"]))
+                if self._poll_wait():
+                    break
                 continue
             except Exception:
                 other_errors += 1
                 consecutive_errors += 1
-                time.sleep(max(0.2, self.conf["wait_interval"]))
+                if self._poll_wait():
+                    break
                 continue
 
             messages = [self._message_from_item(mailbox, item) for item in self._inbox_items(data)]
@@ -1340,7 +1355,8 @@ class TempMailLolProvider(BaseMailProvider):
                     log_diagnostics("命中")
                     return code
                 no_code += 1
-            time.sleep(max(0.2, self.conf["wait_interval"]))
+            if self._poll_wait():
+                break
         log_diagnostics("超时")
         return None
 
@@ -1944,7 +1960,7 @@ class OutlookTokenProvider(BaseMailProvider):
         seen_refs = {str(item) for item in seen_value}
 
         deadline = time.monotonic() + self.conf["wait_timeout"]
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and not self._stopped():
             for message in self.fetch_recent_messages(mailbox):
                 if _message_before_code_boundary(mailbox, message):
                     continue
@@ -1956,7 +1972,8 @@ class OutlookTokenProvider(BaseMailProvider):
                     seen_value.append(ref)
                     return code
                 seen_refs.add(ref)
-            time.sleep(max(0.2, self.conf["wait_interval"]))
+            if self._poll_wait():
+                break
         return None
 
 
@@ -2041,8 +2058,9 @@ def create_mailbox(mail_config: dict, username: str | None = None) -> dict:
     raise RuntimeError(last_error or "所有启用的邮箱提供商均无法创建邮箱")
 
 
-def wait_for_code(mail_config: dict, mailbox: dict) -> str | None:
+def wait_for_code(mail_config: dict, mailbox: dict, stop_event: Event | None = None) -> str | None:
     provider = _create_provider(mail_config, str(mailbox.get("provider") or ""), str(mailbox.get("provider_ref") or ""))
+    provider.stop_event = stop_event
     try:
         return provider.wait_for_code(mailbox)
     finally:

@@ -448,6 +448,7 @@ export type RegisterConfig = {
   check_interval: number;
   stats: {
     job_id?: string;
+    generation?: number;
     success: number;
     fail: number;
     done: number;

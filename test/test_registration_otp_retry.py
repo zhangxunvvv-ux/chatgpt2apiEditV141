@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
@@ -103,6 +105,28 @@ class RegistrationOtpRetryTests(unittest.TestCase):
 
         self.assertIs(response, wrong)
         self.assertEqual(session.calls, 1)
+
+    def test_mailbox_polling_stops_promptly_when_generation_is_stopped(self) -> None:
+        provider = FakeProvider(None)
+        provider.conf.update({"wait_timeout": 30, "wait_interval": 10})
+        stop_event = threading.Event()
+        provider.stop_event = stop_event
+        finished = threading.Event()
+
+        def poll_mailbox() -> None:
+            try:
+                provider.wait_for_code({"address": "user@example.com"})
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=poll_mailbox, daemon=True)
+        started_at = time.monotonic()
+        thread.start()
+        time.sleep(0.05)
+        stop_event.set()
+
+        self.assertTrue(finished.wait(1), "mailbox polling ignored the registration stop event")
+        self.assertLess(time.monotonic() - started_at, 1)
 
 
 if __name__ == "__main__":
