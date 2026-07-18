@@ -22,8 +22,11 @@ class RegisterConcurrencyTests(unittest.TestCase):
 
     def test_only_explicit_rate_limits_trigger_immediate_backoff(self) -> None:
         self.assertEqual(register_service_module._immediate_backoff_reason("account_creation_failed"), "")
+        self.assertEqual(register_service_module._immediate_backoff_reason("registration_disallowed"), "")
         self.assertEqual(register_service_module._immediate_backoff_reason("Could not resolve host"), "")
         self.assertEqual(register_service_module._immediate_backoff_reason("等待注册验证码超时"), "")
+        self.assertEqual(register_service_module._immediate_backoff_reason("rate limit exceeded"), "")
+        self.assertEqual(register_service_module._immediate_backoff_reason("Too Many Requests"), "")
         self.assertEqual(register_service_module._immediate_backoff_reason("HTTP 429 Too Many Requests"), "rate_limit")
 
     def test_normalize_keeps_tempmail_domains_without_legacy_cooldown(self) -> None:
@@ -252,6 +255,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
             service = register_service_module.RegisterService(Path(temp_dir) / "register.json")
             original_run_loop = service._run_loop
             calls = 0
+            started_at = time.monotonic()
 
             def flaky_run_loop() -> None:
                 nonlocal calls
@@ -268,15 +272,17 @@ class RegisterConcurrencyTests(unittest.TestCase):
                         "threads": 1,
                         "total": 1,
                         "mode": "total",
-                        "failure_backoff_seconds": 1,
+                        "failure_backoff_seconds": 1200,
                     }
                 )
-                self.assertTrue(self.wait_until(lambda: not service.get()["enabled"], timeout=4))
+                self.assertTrue(self.wait_until(lambda: not service.get()["enabled"], timeout=3))
 
             stats = service.get()["stats"]
             self.assertEqual(calls, 2)
             self.assertEqual(stats["scheduler_restarts"], 1)
             self.assertEqual(stats["success"], 1)
+            self.assertLess(time.monotonic() - started_at, 3)
+            self.assertIsNone(stats.get("retry_at"))
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ REGISTER_FILE = DATA_DIR / "register.json"
 
 def _immediate_backoff_reason(error: object) -> str:
     text = str(error or "").lower()
-    if "http 429" in text or "http_429" in text or "rate limit" in text or "too many requests" in text:
+    if any(marker in text for marker in ("http 429", "http_429", "status=429", "status_code=429")):
         return "rate_limit"
     return ""
 
@@ -511,14 +511,12 @@ class RegisterService:
                 snapshot = self.get()
                 stats = snapshot.get("stats") if isinstance(snapshot.get("stats"), dict) else {}
                 restarts = int(stats.get("scheduler_restarts") or 0) + 1
-                delay = max(1, int(snapshot.get("failure_backoff_seconds") or 1200))
-                self._bump(running=0, scheduler_restarts=restarts)
+                self._bump(running=0, scheduler_restarts=restarts, retry_at=None, pause_reason="")
                 self._append_log(
-                    f"注册调度器异常（{type(error).__name__}），不会停止任务；{delay} 秒后自动重试",
+                    f"注册调度器异常（{type(error).__name__}），不会停止任务；1 秒后继续调度",
                     "red",
                 )
-                if not self._wait_for_retry(delay, "scheduler_error"):
-                    break
+                time.sleep(1)
         self._bump(running=0, retry_at=None, pause_reason="")
 
 

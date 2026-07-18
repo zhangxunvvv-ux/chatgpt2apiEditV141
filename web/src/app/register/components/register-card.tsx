@@ -56,7 +56,7 @@ export function RegisterCard() {
   const stats = config.stats || { success: 0, fail: 0, done: 0, running: 0, threads: config.threads };
   const retryAt = stats.retry_at ? new Date(stats.retry_at) : null;
   const isCooling = Boolean(config.enabled && retryAt && retryAt.getTime() > Date.now());
-  const coolingReason = stats.pause_reason === "scheduler_error" ? "调度异常" : "接口限流";
+  const coolingReason = "HTTP 429 限流";
   const providers = config.mail.providers || [];
   const logs = config.logs || [];
   const updateProviderType = (index: number, type: string) => {
