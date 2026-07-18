@@ -300,13 +300,12 @@ class RegisterProxyRuntimeTests(unittest.TestCase):
         registrar._register_user.assert_not_called()
         registrar._send_otp.assert_not_called()
         registrar._resend_signup_otp.assert_called_once_with(1, mailbox)
-        self.assertEqual(registrar._validate_mailbox_otp.call_args.args, (mailbox, 1))
-        self.assertTrue(callable(registrar._validate_mailbox_otp.call_args.kwargs["retry_sender"]))
+        registrar._validate_mailbox_otp.assert_called_once_with(mailbox, 1)
         self.assertEqual(result["password"], "")
         self.assertEqual(result["access_token"], "chatgpt-token")
         mark_result.assert_called_once_with(mailbox, success=True)
 
-    def test_resend_signup_otp_reuses_authorize_sentinel_without_exposing_it(self):
+    def test_resend_signup_otp_matches_browser_fetch_headers(self):
         fake_proxy = FakeProxySettings()
         request_calls = []
 
@@ -327,14 +326,24 @@ class RegisterProxyRuntimeTests(unittest.TestCase):
             openai_register, "request_with_local_retry", side_effect=fake_request
         ):
             registrar = openai_register.PlatformRegistrar(proxy="")
-            registrar.authorize_sentinel_token = "authorize-token"
             registrar._resend_signup_otp(1, {"address": "user@example.com"})
 
         self.assertEqual(len(request_calls), 1)
         self.assertEqual(request_calls[0]["method"].lower(), "post")
         self.assertEqual(request_calls[0]["url"], "https://auth.openai.com/api/accounts/email-otp/resend")
         self.assertEqual(request_calls[0]["retry_attempts"], 1)
-        self.assertEqual(request_calls[0]["headers"]["openai-sentinel-token"], "authorize-token")
+        headers = {key.lower(): value for key, value in request_calls[0]["headers"].items()}
+        self.assertEqual(headers["accept"], "*/*")
+        self.assertEqual(headers["origin"], "https://auth.openai.com")
+        self.assertEqual(headers["referer"], "https://auth.openai.com/email-verification")
+        self.assertEqual(headers["sec-fetch-dest"], "empty")
+        self.assertEqual(headers["sec-fetch-mode"], "cors")
+        self.assertEqual(headers["sec-fetch-site"], "same-origin")
+        self.assertIn("traceparent", headers)
+        self.assertIn("tracestate", headers)
+        self.assertNotIn("content-type", headers)
+        self.assertNotIn("oai-device-id", headers)
+        self.assertNotIn("openai-sentinel-token", headers)
 
     def test_cloudflare_challenge_refreshes_clearance_and_retries_once_with_matching_headers(self):
         bundle = ClearanceBundle(
@@ -486,27 +495,6 @@ class RegisterProxyRuntimeTests(unittest.TestCase):
         self.assertEqual(request_calls[0]["method"].lower(), "get")
         self.assertEqual(request_calls[0]["url"], "https://auth.openai.com/api/accounts/email-otp/send")
         self.assertEqual(request_calls[0]["headers"]["openai-sentinel-token"], "password-token")
-
-    def test_direct_otp_fallback_send_uses_authorize_sentinel(self):
-        fake_proxy = FakeProxySettings()
-        request_calls = []
-
-        def fake_request(session, method, url, retry_attempts=3, **kwargs):
-            request_calls.append({"method": method, "url": url, "headers": dict(kwargs.get("headers") or {})})
-            return FakeResponse(status_code=200), ""
-
-        with patch.object(openai_register, "proxy_settings", fake_proxy), patch.object(
-            openai_register, "create_session", return_value=FakeSession()
-        ), patch.object(openai_register, "request_with_local_retry", side_effect=fake_request):
-            registrar = openai_register.PlatformRegistrar(proxy="")
-            registrar.authorize_sentinel_token = "authorize-token"
-            registrar._send_direct_signup_otp(1)
-
-        self.assertEqual(len(request_calls), 1)
-        self.assertEqual(request_calls[0]["method"].lower(), "get")
-        self.assertEqual(request_calls[0]["url"], "https://auth.openai.com/api/accounts/email-otp/send")
-        self.assertEqual(request_calls[0]["headers"]["openai-sentinel-token"], "authorize-token")
-
 
 if __name__ == "__main__":
     unittest.main()

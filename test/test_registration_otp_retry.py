@@ -89,22 +89,6 @@ class RegistrationOtpRetryTests(unittest.TestCase):
         self.assertEqual(wait.call_count, 4)
         validate.assert_called_once_with(registrar.session, registrar.device_id, "222222")
 
-    def test_direct_otp_fallback_send_runs_once_after_first_empty_window(self) -> None:
-        registrar = openai_register.PlatformRegistrar("")
-        mailbox = {"address": "user@example.com"}
-        accepted = FakeResponse(200)
-        retry_sender = mock.Mock()
-
-        with (
-            mock.patch.object(openai_register, "wait_for_code", side_effect=[None, None, "222222"]) as wait,
-            mock.patch.object(openai_register, "validate_otp", return_value=(accepted, "")),
-        ):
-            registrar._validate_mailbox_otp(mailbox, 1, retry_sender=retry_sender)
-
-        registrar.close()
-        self.assertEqual(wait.call_count, 3)
-        retry_sender.assert_called_once_with()
-
     def test_validate_does_not_resubmit_same_known_wrong_code_with_sentinel(self) -> None:
         wrong = FakeResponse(401, "wrong_email_otp_code")
 

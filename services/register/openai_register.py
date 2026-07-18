@@ -10,7 +10,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from curl_cffi import requests
@@ -488,6 +488,30 @@ class PlatformRegistrar:
         headers.update(_make_trace_headers())
         return headers
 
+    def _otp_fetch_headers(self) -> dict[str, str]:
+        headers = {
+            "accept": "*/*",
+            "accept-encoding": "gzip, deflate, br",
+            "accept-language": "en-US,en;q=0.9",
+            "origin": auth_base,
+            "priority": "u=1, i",
+            "referer": f"{auth_base}/email-verification",
+            "sec-ch-ua": sec_ch_ua,
+            "sec-ch-ua-arch": '"x86_64"',
+            "sec-ch-ua-bitness": '"64"',
+            "sec-ch-ua-full-version-list": sec_ch_ua_full_version_list,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-model": '""',
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-ch-ua-platform-version": '"10.0.0"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "user-agent": user_agent,
+        }
+        headers.update(_make_trace_headers())
+        return headers
+
     def _refresh_cloudflare_clearance(self, target_url: str, index: int) -> ClearanceBundle | None:
         self.clearance_failure_reason = ""
         profile = proxy_settings.get_profile(proxy=self.proxy, upstream=True) if hasattr(proxy_settings, "get_profile") else None
@@ -931,8 +955,6 @@ class PlatformRegistrar:
 
     def _resend_signup_otp(self, index: int, mailbox: dict[str, Any]) -> None:
         self._ensure_active()
-        if not self.authorize_sentinel_token:
-            raise RuntimeError("resend_otp_missing_authorize_sentinel")
         try:
             mail_provider.prepare_code_baseline(_mail_config(self.proxy), mailbox)
             step(index, "重发验证码前邮箱基线已记录")
@@ -941,10 +963,17 @@ class PlatformRegistrar:
 
         step(index, "开始重发注册验证码")
         url = f"{auth_base}/api/accounts/email-otp/resend"
+        try:
+            cookie_count = len(self.session.cookies.get_dict())
+        except Exception:
+            cookie_count = 0
+        step(
+            index,
+            f"OTP resend browser headers: cookie_count={cookie_count}, sentinel_header=false, device_header=false",
+        )
 
         def submit():
-            headers = self._json_headers(f"{auth_base}/email-verification")
-            headers["openai-sentinel-token"] = self.authorize_sentinel_token
+            headers = self._otp_fetch_headers()
             headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
             return request_with_local_retry(
                 self.session,
@@ -981,41 +1010,6 @@ class PlatformRegistrar:
             raise RuntimeError(f"resend_otp_rejected: {error_message}")
         step(index, "重发注册验证码完成")
 
-    def _send_direct_signup_otp(self, index: int) -> None:
-        self._ensure_active()
-        if not self.authorize_sentinel_token:
-            raise RuntimeError("direct_send_otp_missing_authorize_sentinel")
-        step(index, "新流程未投递，尝试兼容发码")
-        url = f"{auth_base}/api/accounts/email-otp/send"
-
-        def submit():
-            headers = self._json_headers(f"{auth_base}/email-verification")
-            headers["openai-sentinel-token"] = self.authorize_sentinel_token
-            headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
-            return request_with_local_retry(
-                self.session,
-                "get",
-                url,
-                retry_attempts=1,
-                headers=headers,
-                allow_redirects=True,
-                verify=False,
-            )
-
-        resp, error = submit()
-        if _is_cloudflare_challenge(resp):
-            bundle = self._refresh_cloudflare_clearance(auth_base, index)
-            if bundle is None:
-                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
-            resp, error = submit()
-        if resp is None or resp.status_code not in (200, 302):
-            raise RuntimeError(
-                error
-                or f"direct_send_otp_http_{getattr(resp, 'status_code', 'unknown')}, "
-                f"{_response_debug_detail(resp, 400)}"
-            )
-        step(index, "兼容发码请求完成")
-
     def _validate_otp(self, code: str, index: int) -> None:
         step(index, "开始校验验证码")
         resp, error = validate_otp(self.session, self.device_id, code)
@@ -1028,12 +1022,7 @@ class PlatformRegistrar:
             raise RuntimeError(error or f"validate_otp_http_{getattr(resp, 'status_code', 'unknown')}_body={body}")
         step(index, "验证码校验完成")
 
-    def _validate_mailbox_otp(
-        self,
-        mailbox: dict[str, Any],
-        index: int,
-        retry_sender: Callable[[], None] | None = None,
-    ) -> None:
+    def _validate_mailbox_otp(self, mailbox: dict[str, Any], index: int) -> None:
         max_attempts = 4
         last_detail = ""
         for attempt in range(1, max_attempts + 1):
@@ -1042,11 +1031,6 @@ class PlatformRegistrar:
             code = wait_for_code(mailbox, register_proxy=self.proxy, stop_event=self.stop_event)
             self._ensure_active()
             if not code:
-                if attempt == 1 and retry_sender is not None:
-                    try:
-                        retry_sender()
-                    except Exception as retry_error:
-                        step(index, f"兼容发码失败，继续等待当前验证码: {str(retry_error)[:200]}", "yellow")
                 if attempt >= max_attempts:
                     raise RuntimeError(last_detail or "等待注册验证码超时")
                 step(index, f"第 {attempt}/{max_attempts} 次等待未收到验证码，继续等待", "yellow")
@@ -1154,14 +1138,7 @@ class PlatformRegistrar:
                         f"email_verification_mode={verification_mode or 'unknown'}"
                     )
                 self._resend_signup_otp(index, mailbox)
-            if signup_mode == "otp":
-                self._validate_mailbox_otp(
-                    mailbox,
-                    index,
-                    retry_sender=lambda: self._send_direct_signup_otp(index),
-                )
-            else:
-                self._validate_mailbox_otp(mailbox, index)
+            self._validate_mailbox_otp(mailbox, index)
             self._ensure_active()
             self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
             self._ensure_active()
