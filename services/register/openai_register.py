@@ -1067,7 +1067,7 @@ class PlatformRegistrar:
 
     def _validate_otp(self, code: str, index: int) -> None:
         step(index, "开始校验验证码")
-        resp, error = validate_otp(self.session, self.device_id, code)
+        resp, error = self._request_otp_validation(code, index)
         if resp is None or resp.status_code != 200:
             body = ""
             try:
@@ -1076,6 +1076,12 @@ class PlatformRegistrar:
                 pass
             raise RuntimeError(error or f"validate_otp_http_{getattr(resp, 'status_code', 'unknown')}_body={body}")
         step(index, "验证码校验完成")
+
+    def _request_otp_validation(self, code: str, index: int):
+        return validate_otp(self.session, self.device_id, code)
+
+    def _otp_validation_retryable(self, error_code: str) -> bool:
+        return error_code in {"wrong_email_otp_code", "email_otp_invalid", "invalid_code"}
 
     def _retry_signup_otp_delivery(self, mailbox: dict[str, Any], index: int, reason: str) -> None:
         """Request a fresh OTP between polling windows without hiding hard rate limits."""
@@ -1107,7 +1113,7 @@ class PlatformRegistrar:
             mail_provider.mark_verification_code_received(mailbox)
             step(index, "收到注册验证码")
             step(index, "开始校验验证码")
-            resp, error = validate_otp(self.session, self.device_id, code)
+            resp, error = self._request_otp_validation(code, index)
             if resp is not None and resp.status_code == 200:
                 step(index, "验证码校验完成")
                 return
@@ -1119,7 +1125,7 @@ class PlatformRegistrar:
             except Exception:
                 pass
             last_detail = error or f"validate_otp_http_{getattr(resp, 'status_code', 'unknown')}_body={body}"
-            retryable = error_code in {"wrong_email_otp_code", "email_otp_invalid", "invalid_code"}
+            retryable = self._otp_validation_retryable(error_code)
             if not retryable or attempt >= max_attempts:
                 raise RuntimeError(last_detail)
 

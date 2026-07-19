@@ -47,12 +47,13 @@ class ReferenceRegisterTests(unittest.TestCase):
         self.assertEqual(result["registration_engine"], "reference")
         mark_result.assert_called_once_with(mailbox, success=True)
 
-    def test_direct_otp_flow_reuses_shared_resend_and_mailbox_reader(self) -> None:
+    def test_direct_otp_flow_keeps_first_code_without_immediate_resend(self) -> None:
         mailbox = {"address": "user@example.test", "provider": "test"}
         registrar = reference_register.ReferencePlatformRegistrar("")
         with (
             mock.patch.object(openai_register, "create_mailbox", return_value=mailbox),
             mock.patch.object(openai_register.mail_provider, "mark_mailbox_result"),
+            mock.patch.object(openai_register.mail_provider, "prepare_code_baseline") as baseline,
             mock.patch.object(registrar, "_chatgpt_authorize"),
             mock.patch.object(
                 registrar,
@@ -75,8 +76,58 @@ class ReferenceRegisterTests(unittest.TestCase):
         registrar.close()
         register_user.assert_not_called()
         send_otp.assert_not_called()
-        resend.assert_called_once_with(2, mailbox)
+        resend.assert_not_called()
+        baseline.assert_called_once()
         self.assertEqual(result["password"], "")
+
+    def test_reference_otp_validation_uses_same_profile_without_device_or_sentinel_headers(self) -> None:
+        registrar = reference_register.ReferencePlatformRegistrar("")
+        response = mock.Mock(status_code=200)
+        calls = []
+
+        def fake_request(_session, method, url, **kwargs):
+            calls.append({"method": method, "url": url, **kwargs})
+            return response, ""
+
+        with (
+            mock.patch.object(openai_register, "request_with_local_retry", side_effect=fake_request),
+            mock.patch.object(openai_register, "_headers_with_clearance", side_effect=lambda headers, *_args: headers),
+        ):
+            actual, error = registrar._request_otp_validation("123456", 3)
+
+        registrar.close()
+        self.assertIs(actual, response)
+        self.assertEqual(error, "")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["method"], "post")
+        self.assertEqual(calls[0]["url"], "https://auth.openai.com/api/accounts/email-otp/validate")
+        self.assertEqual(calls[0]["json"], {"code": "123456"})
+        headers = {key.lower(): value for key, value in calls[0]["headers"].items()}
+        self.assertEqual(headers["user-agent"], registrar._browser_user_agent())
+        self.assertNotIn("oai-device-id", headers)
+        self.assertNotIn("openai-sentinel-token", headers)
+        self.assertNotIn("traceparent", headers)
+
+    def test_passwordless_login_failed_requests_one_fresh_code_before_retrying(self) -> None:
+        registrar = reference_register.ReferencePlatformRegistrar("")
+        registrar.signup_verification_mode = "passwordless_signup"
+        rejected = mock.Mock(status_code=401, text='{"error":{"code":"login_failed"}}')
+        rejected.json.return_value = {"error": {"code": "login_failed"}}
+        accepted = mock.Mock(status_code=200, text="")
+        accepted.json.return_value = {}
+        mailbox = {"address": "user@example.test"}
+
+        with (
+            mock.patch.object(openai_register, "wait_for_code", side_effect=["111111", "222222"]),
+            mock.patch.object(registrar, "_request_otp_validation", side_effect=[(rejected, ""), (accepted, "")]) as validate,
+            mock.patch.object(registrar, "_resend_signup_otp") as resend,
+            mock.patch.object(openai_register.time, "sleep", return_value=None),
+        ):
+            registrar._validate_mailbox_otp(mailbox, 4)
+
+        registrar.close()
+        self.assertEqual(validate.call_count, 2)
+        resend.assert_called_once_with(4, mailbox)
 
     def test_random_profile_is_used_for_sentinel_generation(self) -> None:
         registrar = reference_register.ReferencePlatformRegistrar("")

@@ -64,6 +64,7 @@ class RegistrationOtpRetryTests(unittest.TestCase):
         with (
             mock.patch.object(openai_register, "wait_for_code", side_effect=["111111", "222222"]),
             mock.patch.object(openai_register, "validate_otp", side_effect=[(wrong, ""), (accepted, "")]) as validate,
+            mock.patch.object(registrar, "_resend_signup_otp") as resend,
             mock.patch.object(openai_register.time, "sleep", return_value=None),
         ):
             registrar._validate_mailbox_otp(mailbox, 1)
@@ -72,6 +73,7 @@ class RegistrationOtpRetryTests(unittest.TestCase):
         self.assertEqual(validate.call_count, 2)
         self.assertEqual(validate.call_args_list[0].args[2], "111111")
         self.assertEqual(validate.call_args_list[1].args[2], "222222")
+        resend.assert_called_once_with(1, mailbox)
         self.assertEqual(mailbox["_rejected_verification_codes"], ["111111"])
 
     def test_mailbox_timeout_retries_all_four_wait_windows(self) -> None:

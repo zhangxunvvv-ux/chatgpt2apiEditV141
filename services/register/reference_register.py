@@ -97,13 +97,59 @@ class ReferencePlatformRegistrar(openai_register.PlatformRegistrar):
         headers.update(self._profile_headers())
         return headers
 
-    def _send_email_otp_reference(self, index: int, mailbox: dict[str, Any]) -> None:
-        self._ensure_active()
+    def _prepare_reference_code_baseline(self, index: int, mailbox: dict[str, Any], label: str) -> None:
         try:
             mail_provider.prepare_code_baseline(openai_register._mail_config(self.proxy), mailbox)
-            openai_register.step(index, "新注册：发送验证码前邮箱基线已记录")
+            openai_register.step(index, f"新注册：{label}邮箱基线已记录")
         except Exception as exc:
-            openai_register.step(index, f"新注册：邮箱基线记录失败，继续发码: {str(exc)[:160]}", "yellow")
+            openai_register.step(index, f"新注册：邮箱基线记录失败，继续注册: {str(exc)[:160]}", "yellow")
+
+    def _request_otp_validation(self, code: str, index: int):
+        """Match the reference flow's OTP request without changing its device profile mid-session."""
+        url = f"{openai_register.auth_base}/api/accounts/email-otp/validate"
+
+        def submit():
+            headers = {
+                "accept": "application/json",
+                "content-type": "application/json",
+                "origin": openai_register.auth_base,
+                "referer": f"{openai_register.auth_base}/email-verification",
+                "user-agent": self._browser_user_agent(),
+            }
+            headers = openai_register._headers_with_clearance(
+                headers,
+                url,
+                self.proxy,
+                self.clearance_user_agent,
+            )
+            return openai_register.request_with_local_retry(
+                self.session,
+                "post",
+                url,
+                json={"code": code},
+                headers=headers,
+                verify=False,
+            )
+
+        response, error = submit()
+        if openai_register._is_cloudflare_challenge(response):
+            bundle = self._refresh_cloudflare_clearance(openai_register.auth_base, index)
+            if bundle is None:
+                return response, openai_register._cloudflare_block_message(
+                    response,
+                    reason=self.clearance_failure_reason,
+                )
+            response, error = submit()
+        return response, error
+
+    def _otp_validation_retryable(self, error_code: str) -> bool:
+        return super()._otp_validation_retryable(error_code) or (
+            self.signup_verification_mode == "passwordless_signup" and error_code == "login_failed"
+        )
+
+    def _send_email_otp_reference(self, index: int, mailbox: dict[str, Any]) -> None:
+        self._ensure_active()
+        self._prepare_reference_code_baseline(index, mailbox, "发送验证码前")
 
         url = f"{openai_register.auth_base}/api/accounts/email-otp/send"
 
@@ -156,6 +202,9 @@ class ReferencePlatformRegistrar(openai_register.PlatformRegistrar):
 
         try:
             self._ensure_active()
+            # login_hint/authorize may send the passwordless OTP before
+            # authorize/continue returns, so establish the mailbox boundary first.
+            self._prepare_reference_code_baseline(index, mailbox, "注册开始前")
             openai_register.step(
                 index,
                 f"新注册：设备画像={'mobile' if self._is_mobile else 'desktop'}",
@@ -179,7 +228,7 @@ class ReferencePlatformRegistrar(openai_register.PlatformRegistrar):
                         "reference_signup_otp_mode_unconfirmed: "
                         f"email_verification_mode={verification_mode or 'unknown'}"
                     )
-                self._resend_signup_otp(index, mailbox)
+                openai_register.step(index, "新注册：提交邮箱已触发验证码，直接等待首封邮件")
 
             self._validate_mailbox_otp(mailbox, index)
             first_name, last_name = openai_register._random_name()
