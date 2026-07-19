@@ -101,7 +101,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
       type,
       enable: true,
       ...(type === "cloudmail_gen" ? { api_base: "", admin_email: "", admin_password: "", domain: [], subdomain: [], email_prefix: "" } : {}),
-      ...(type === "cloudflare_temp_email" ? { api_base: "", admin_password: "", domain: [], subdomain: [], random_subdomain_depth: 1 } : {}),
+      ...(type === "cloudflare_temp_email" ? { api_base: "", admin_password: "", domain: [], subdomain: [], subdomain_levels: [], random_subdomain_depth: 1 } : {}),
       ...(type === "tempmail_lol" ? { api_key: "", domain: [] } : {}),
       ...(type === "moemail" ? { api_base: "", api_key: "", domain: [] } : {}),
       ...(type === "inbucket" ? { api_base: "", domain: [], random_subdomain: true } : {}),
@@ -227,6 +227,13 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
                 const type = String(provider.type || "tempmail_lol");
                 const domains = Array.isArray(provider.domain) ? provider.domain.map(String).join("\n") : "";
                 const subdomains = Array.isArray(provider.subdomain) ? provider.subdomain.map(String).join("\n") : String(provider.subdomain || "");
+                const savedLevels = Array.isArray(provider.subdomain_levels) ? provider.subdomain_levels.map(String) : [];
+                const legacyPrefix = subdomains.split(/\r?\n/).map((item) => item.trim()).find(Boolean) || "";
+                const cloudflareLevels = savedLevels.length ? savedLevels : legacyPrefix ? legacyPrefix.split(".").reverse() : [""];
+                const hasManualLevels = cloudflareLevels.some((value) => value.trim().length > 0);
+                const rootDomainPreview = domains.split(/\r?\n/).map((item) => item.trim()).find(Boolean) || "example.com";
+                const manualPrefixPreview = cloudflareLevels.map((item) => item.trim()).filter(Boolean).reverse().join(".");
+                const domainPreview = manualPrefixPreview ? `${manualPrefixPreview}.${rootDomainPreview}` : `随机前缀.${rootDomainPreview}`;
                 const domainStats = Array.isArray(provider.domain_stats) ? provider.domain_stats as Array<Record<string, unknown>> : [];
                 return (
                   <div key={index} className="space-y-3 border-t border-stone-200 pt-3 first:border-t-0 first:pt-0">
@@ -438,30 +445,75 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
                       </div>
                     ) : null}
                     {type === "cloudflare_temp_email" ? (
-                      <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_160px]">
-                        <div className="space-y-2">
-                          <label className="text-sm text-stone-700">N 级域名（可选）</label>
-                          <Textarea
-                            value={subdomains}
-                            onChange={(event) => updateProvider(index, { subdomain: event.target.value.split(/[\n,]/).map((item) => item.trim()) })}
-                            placeholder={"支持 mail、team.mail 或完整域名\n可填写多个，每行一个；留空默认随机"}
-                            className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs"
-                            disabled={config.enabled}
-                          />
-                          <p className="text-xs leading-5 text-stone-500">填写后从候选中随机选取；未填写时自动生成随机 N 级域名。</p>
+                      <div className="space-y-4 rounded-xl border border-stone-200 bg-white/70 p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-medium text-stone-800">手动 N 级域名</div>
+                            <p className="mt-1 text-xs leading-5 text-stone-500">第 1 级最靠近根域名；全部留空时默认使用随机域名。</p>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="h-8 rounded-lg border-stone-200 bg-white px-3 text-xs"
+                            onClick={() => updateProvider(index, { subdomain_levels: [...cloudflareLevels, ""], subdomain: [] })}
+                            disabled={config.enabled || cloudflareLevels.length >= 10}
+                          >
+                            <Plus className="size-3.5" />
+                            添加一级
+                          </Button>
                         </div>
-                        <div className="space-y-2">
-                          <label className="text-sm text-stone-700">随机层级</label>
-                          <Input
-                            type="number"
-                            min={1}
-                            max={5}
-                            value={String(provider.random_subdomain_depth || 1)}
-                            onChange={(event) => updateProvider(index, { random_subdomain_depth: Math.max(1, Math.min(5, Number(event.target.value) || 1)) })}
-                            className="h-10 rounded-xl border-stone-200 bg-white"
-                            disabled={config.enabled || subdomains.trim().length > 0}
-                          />
-                          <p className="text-xs leading-5 text-stone-500">仅在自定义留空时生效，范围 1-5。</p>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          {cloudflareLevels.map((value, levelIndex) => (
+                            <div key={levelIndex} className="space-y-1.5">
+                              <label className="text-xs font-medium text-stone-600">
+                                第 {levelIndex + 1} 级{levelIndex === 0 ? "（靠近根域名）" : ""}
+                              </label>
+                              <div className="flex gap-2">
+                                <Input
+                                  value={value}
+                                  onChange={(event) => {
+                                    const nextLevels = [...cloudflareLevels];
+                                    nextLevels[levelIndex] = event.target.value.trim().replace(/^\.+|\.+$/g, "");
+                                    updateProvider(index, { subdomain_levels: nextLevels, subdomain: [] });
+                                  }}
+                                  placeholder={levelIndex === 0 ? "例如 sfsfe" : "例如 grtwrwe"}
+                                  className="h-10 rounded-xl border-stone-200 bg-white font-mono text-sm"
+                                  disabled={config.enabled}
+                                />
+                                <button
+                                  type="button"
+                                  className="rounded-lg border border-stone-200 px-2.5 text-stone-400 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-500 disabled:opacity-40"
+                                  onClick={() => {
+                                    const nextLevels = cloudflareLevels.filter((_, itemIndex) => itemIndex !== levelIndex);
+                                    updateProvider(index, { subdomain_levels: nextLevels.length ? nextLevels : [""], subdomain: [] });
+                                  }}
+                                  disabled={config.enabled}
+                                  title={`删除第 ${levelIndex + 1} 级`}
+                                >
+                                  <Trash2 className="size-4" />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="grid gap-4 border-t border-stone-100 pt-3 md:grid-cols-[160px_minmax(0,1fr)]">
+                          <div className="space-y-2">
+                            <label className="text-sm text-stone-700">随机层级</label>
+                            <Input
+                              type="number"
+                              min={1}
+                              max={5}
+                              value={String(provider.random_subdomain_depth || 1)}
+                              onChange={(event) => updateProvider(index, { random_subdomain_depth: Math.max(1, Math.min(5, Number(event.target.value) || 1)) })}
+                              className="h-10 rounded-xl border-stone-200 bg-white"
+                              disabled={config.enabled || hasManualLevels}
+                            />
+                          </div>
+                          <div className="rounded-lg bg-stone-50 px-3 py-2.5">
+                            <div className="text-xs text-stone-400">最终域名预览</div>
+                            <div className="mt-1 break-all font-mono text-sm font-semibold text-stone-800">{domainPreview}</div>
+                            {hasManualLevels ? <p className="mt-1 text-xs text-stone-500">示例：第1级 sfsfe、第2级 grtwrwe → grtwrwe.sfsfe.{rootDomainPreview}</p> : <p className="mt-1 text-xs text-stone-500">当前使用随机 {Number(provider.random_subdomain_depth || 1)} 级域名。</p>}
+                          </div>
                         </div>
                       </div>
                     ) : null}

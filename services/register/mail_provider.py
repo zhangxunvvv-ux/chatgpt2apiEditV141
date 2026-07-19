@@ -539,6 +539,7 @@ class CloudflareTempMailProvider(BaseMailProvider):
         self.admin_password = str(entry["admin_password"]).strip()
         self.domain = _normalize_string_list(entry.get("domain"))
         self.subdomain = _normalize_string_list(entry.get("subdomain"))
+        self.subdomain_levels = _normalize_string_list(entry.get("subdomain_levels"))
         try:
             depth = int(entry.get("random_subdomain_depth") or 1)
         except (TypeError, ValueError):
@@ -560,6 +561,14 @@ class CloudflareTempMailProvider(BaseMailProvider):
 
     def _resolve_domain(self) -> str:
         base_domain = _normalize_dns_name(_next_domain(self.domain), "CloudflareTempMail 根域名")
+        if self.subdomain_levels:
+            levels = [
+                _normalize_dns_name(value, f"CloudflareTempMail 第 {index} 级域名")
+                for index, value in enumerate(self.subdomain_levels, start=1)
+            ]
+            if any("." in level for level in levels):
+                raise RuntimeError("CloudflareTempMail 手动域名每一级只能填写一个标签，不能包含点号")
+            return f"{'.'.join(reversed(levels))}.{base_domain}"
         if self.subdomain:
             custom = _normalize_dns_name(random.choice(self.subdomain), "CloudflareTempMail N 级域名")
             if custom == base_domain or custom.endswith(f".{base_domain}"):

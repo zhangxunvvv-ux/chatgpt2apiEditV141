@@ -112,6 +112,12 @@ def _normalize(raw: dict) -> dict:
                         provider.pop(key, None)
                 elif provider.get("type") == "cloudflare_temp_email":
                     provider.pop("rate_limit_cooldown_seconds", None)
+                    levels = provider.get("subdomain_levels")
+                    if isinstance(levels, list):
+                        provider["subdomain_levels"] = [str(value).strip() for value in levels if str(value).strip()]
+                    else:
+                        value = str(levels or "").strip()
+                        provider["subdomain_levels"] = [value] if value else []
                     try:
                         depth = int(provider.get("random_subdomain_depth") or 1)
                     except (TypeError, ValueError):

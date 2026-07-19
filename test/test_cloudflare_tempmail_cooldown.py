@@ -107,6 +107,37 @@ class CloudflareTempMailNoCooldownTests(unittest.TestCase):
 
         self.assertEqual(session.calls[0]["json"]["domain"], "team.mail.example.test")
 
+    def test_manual_levels_are_composed_from_root_outward(self):
+        session = FakeSession([FakeResponse(200, {"address": "user@grtwrwe.sfsfe.example.test", "jwt": "mail-token"})])
+        entry = {
+            "provider_ref": "cloudflare-test",
+            "api_base": "https://mail.example.test",
+            "admin_password": "secret",
+            "domain": ["example.test"],
+            "subdomain_levels": ["sfsfe", "grtwrwe"],
+        }
+        conf = {"request_timeout": 30, "wait_timeout": 30, "wait_interval": 2, "user_agent": "test", "proxy": ""}
+        with mock.patch.object(mail_provider, "_create_session", return_value=session):
+            provider = mail_provider.CloudflareTempMailProvider(entry, conf)
+            provider.create_mailbox("user")
+
+        self.assertEqual(session.calls[0]["json"]["domain"], "grtwrwe.sfsfe.example.test")
+
+    def test_manual_level_rejects_dot_separated_value(self):
+        session = FakeSession([])
+        entry = {
+            "provider_ref": "cloudflare-test",
+            "api_base": "https://mail.example.test",
+            "admin_password": "secret",
+            "domain": ["example.test"],
+            "subdomain_levels": ["sfsfe.grtwrwe"],
+        }
+        conf = {"request_timeout": 30, "wait_timeout": 30, "wait_interval": 2, "user_agent": "test", "proxy": ""}
+        with mock.patch.object(mail_provider, "_create_session", return_value=session):
+            provider = mail_provider.CloudflareTempMailProvider(entry, conf)
+            with self.assertRaisesRegex(RuntimeError, "每一级只能填写一个标签"):
+                provider.create_mailbox("user")
+
     def test_full_custom_domain_is_not_duplicated(self):
         session = FakeSession([FakeResponse(200, {"address": "user@team.mail.example.test", "jwt": "mail-token"})])
         entry = {
