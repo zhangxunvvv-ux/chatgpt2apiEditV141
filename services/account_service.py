@@ -205,6 +205,37 @@ class AccountService:
         }
         return aliases.get(compact) or aliases.get(key) or raw
 
+    @classmethod
+    def _account_browser_identity(cls, account: dict | None = None) -> dict[str, str]:
+        account = account if isinstance(account, dict) else {}
+        raw_fp = account.get("fp")
+        fp = {str(key).lower(): str(value) for key, value in raw_fp.items()} if isinstance(raw_fp, dict) else {}
+        for key in (
+            "user-agent",
+            "impersonate",
+            "oai-device-id",
+            "oai-session-id",
+            "accept-language",
+            "sec-ch-ua",
+            "sec-ch-ua-mobile",
+            "sec-ch-ua-platform",
+            "sec-ch-ua-platform-version",
+        ):
+            value = str(account.get(key) or "").strip()
+            if value:
+                fp[key] = value
+        return {
+            "user-agent": fp.get("user-agent") or cls._OAUTH_USER_AGENT,
+            "impersonate": fp.get("impersonate") or "chrome110",
+            "oai-device-id": fp.get("oai-device-id") or "",
+            "oai-session-id": fp.get("oai-session-id") or "",
+            "accept-language": fp.get("accept-language") or "zh-CN,zh;q=0.9,en;q=0.8",
+            "sec-ch-ua": fp.get("sec-ch-ua") or '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"',
+            "sec-ch-ua-mobile": fp.get("sec-ch-ua-mobile") or "?0",
+            "sec-ch-ua-platform": fp.get("sec-ch-ua-platform") or '"Windows"',
+            "sec-ch-ua-platform-version": fp.get("sec-ch-ua-platform-version") or '"10.0.0"',
+        }
+
     def _search_account_type(self, payload: object) -> str | None:
         if isinstance(payload, dict):
             for key in ("plan_type", "account_plan", "account_type", "subscription_type", "type"):
@@ -241,6 +272,12 @@ class AccountService:
         normalized["email"] = normalized.get("email") or None
         normalized["user_id"] = normalized.get("user_id") or None
         normalized["proxy"] = str(normalized.get("proxy") or "").strip()
+        raw_fp = normalized.get("fp")
+        normalized["fp"] = {
+            str(key).lower(): str(value)
+            for key, value in raw_fp.items()
+            if str(key).strip() and value is not None and str(value).strip()
+        } if isinstance(raw_fp, dict) else {}
         source_type = normalized.get("source_type")
         if not source_type and str(normalized.get("export_type") or "").strip().lower() == "codex":
             source_type = "codex"
@@ -389,14 +426,19 @@ class AccountService:
         from curl_cffi import requests
         from services.proxy_service import proxy_settings
 
-        session = requests.Session(**proxy_settings.build_session_kwargs(account=account, impersonate="chrome110", verify=True))
+        identity = self._account_browser_identity(account)
+        session = requests.Session(**proxy_settings.build_session_kwargs(
+            account=account,
+            impersonate=identity["impersonate"],
+            verify=True,
+        ))
         try:
             response = session.post(
                 self._OAUTH_TOKEN_URL,
                 headers={
                     "Accept": "application/json",
                     "Content-Type": "application/x-www-form-urlencoded",
-                    "User-Agent": self._OAUTH_USER_AGENT,
+                    "User-Agent": identity["user-agent"],
                 },
                 data={
                     "grant_type": "refresh_token",
@@ -427,16 +469,31 @@ class AccountService:
         cookie_header = str(account.get("cookie") or "").strip()
         if not cookie_header:
             raise RuntimeError("chatgpt_session_cookie_missing")
-        session = requests.Session(**proxy_settings.build_session_kwargs(account=account, impersonate="chrome110", verify=True))
+        identity = self._account_browser_identity(account)
+        session = requests.Session(**proxy_settings.build_session_kwargs(
+            account=account,
+            impersonate=identity["impersonate"],
+            verify=True,
+        ))
         try:
+            headers = {
+                "Accept": "application/json",
+                "Accept-Language": identity["accept-language"],
+                "Cookie": cookie_header,
+                "Referer": "https://chatgpt.com/",
+                "User-Agent": identity["user-agent"],
+                "Sec-Ch-Ua": identity["sec-ch-ua"],
+                "Sec-Ch-Ua-Mobile": identity["sec-ch-ua-mobile"],
+                "Sec-Ch-Ua-Platform": identity["sec-ch-ua-platform"],
+                "Sec-Ch-Ua-Platform-Version": identity["sec-ch-ua-platform-version"],
+            }
+            if identity["oai-device-id"]:
+                headers["OAI-Device-Id"] = identity["oai-device-id"]
+            if identity["oai-session-id"]:
+                headers["OAI-Session-Id"] = identity["oai-session-id"]
             response = session.get(
                 "https://chatgpt.com/api/auth/session",
-                headers={
-                    "Accept": "application/json",
-                    "Cookie": cookie_header,
-                    "Referer": "https://chatgpt.com/",
-                    "User-Agent": self._OAUTH_USER_AGENT,
-                },
+                headers=headers,
                 timeout=30,
             )
             data = response.json() if response.text else {}
@@ -596,7 +653,8 @@ class AccountService:
     def _password_re_login_thread(self, access_token: str, email: str, password: str, event: str, progress_id: str | None = None) -> None:
         """密码重新登录线程入口"""
         try:
-            result = self._login_with_password(email, password)
+            account = self.get_account(access_token) or {}
+            result = self._login_with_password(email, password, account=account)
             if result.get("ok"):
                 # 登录成功，更新账号
                 new_access_token = result.get("access_token", "")
@@ -705,9 +763,10 @@ class AccountService:
             if progress_id:
                 self.update_relogin_progress(progress_id, access_token, "异常", str(exc))
 
-    def _login_with_password(self, email: str, password: str) -> dict:
+    def _login_with_password(self, email: str, password: str, account: dict | None = None) -> dict:
         """通过邮箱+密码登录，返回 {access_token, refresh_token, id_token, ...}"""
         from curl_cffi import requests
+        from services.proxy_service import proxy_settings
         
         # 常量
         auth_base = "https://auth.openai.com"
@@ -715,17 +774,19 @@ class AccountService:
         platform_auth0_client = "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9"
         platform_oauth_client_id = self._OAUTH_CLIENT_ID
         platform_oauth_redirect_uri = "https://platform.openai.com/auth/callback"
-        user_agent = self._OAUTH_USER_AGENT
+        identity = self._account_browser_identity(account)
+        user_agent = identity["user-agent"]
         
         # 创建 session
-        session_kwargs = {"impersonate": "chrome110", "verify": False}
-        proxy = config.get_proxy_settings()
-        if proxy:
-            session_kwargs["proxy"] = proxy
+        session_kwargs = proxy_settings.build_session_kwargs(
+            account=account,
+            impersonate=identity["impersonate"],
+            verify=False,
+        )
         session = requests.Session(**session_kwargs)
         
         try:
-            device_id = str(uuid.uuid4())
+            device_id = identity["oai-device-id"] or str(uuid.uuid4())
             
             # ─── 方式2: OAuth authorize 流程 ──────────────────────────
             # 使用 Platform Client + PKCE（与注册流程相同）
@@ -759,11 +820,11 @@ class AccountService:
                 authorize_url,
                 headers={
                     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    "accept-language": identity["accept-language"],
                     "user-agent": user_agent,
-                    "sec-ch-ua": '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"',
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"Windows"',
+                    "sec-ch-ua": identity["sec-ch-ua"],
+                    "sec-ch-ua-mobile": identity["sec-ch-ua-mobile"],
+                    "sec-ch-ua-platform": identity["sec-ch-ua-platform"],
                     "sec-fetch-dest": "document",
                     "sec-fetch-mode": "navigate",
                     "sec-fetch-site": "cross-site",
@@ -798,20 +859,22 @@ class AccountService:
             # ③ 提交密码验证
             login_headers = {
                 "accept": "application/json",
-                "accept-language": "zh-CN,zh;q=0.9",
+                "accept-language": identity["accept-language"],
                 "content-type": "application/json",
                 "origin": auth_base,
                 "priority": "u=1, i",
                 "user-agent": user_agent,
-                "sec-ch-ua": '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
+                "sec-ch-ua": identity["sec-ch-ua"],
+                "sec-ch-ua-mobile": identity["sec-ch-ua-mobile"],
+                "sec-ch-ua-platform": identity["sec-ch-ua-platform"],
                 "sec-fetch-dest": "empty",
                 "sec-fetch-mode": "cors",
                 "sec-fetch-site": "same-origin",
                 "referer": f"{auth_base}/email-verification",
                 "oai-device-id": device_id,
             }
+            if identity["oai-session-id"]:
+                login_headers["oai-session-id"] = identity["oai-session-id"]
             
             # 添加 sentinel token
             try:
@@ -874,7 +937,7 @@ class AccountService:
                 f"{auth_base}/api/accounts/oauth/token",
                 headers={
                     "accept": "*/*",
-                    "accept-language": "zh-CN,zh;q=0.9",
+                    "accept-language": identity["accept-language"],
                     "auth0-client": platform_auth0_client,
                     "cache-control": "no-cache",
                     "content-type": "application/json",
@@ -882,9 +945,9 @@ class AccountService:
                     "pragma": "no-cache",
                     "priority": "u=1, i",
                     "referer": f"{platform_base}/",
-                    "sec-ch-ua": '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"',
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"Windows"',
+                    "sec-ch-ua": identity["sec-ch-ua"],
+                    "sec-ch-ua-mobile": identity["sec-ch-ua-mobile"],
+                    "sec-ch-ua-platform": identity["sec-ch-ua-platform"],
                     "sec-fetch-dest": "empty",
                     "sec-fetch-mode": "cors",
                     "sec-fetch-site": "same-site",
@@ -1303,6 +1366,8 @@ class AccountService:
                 account = dict(item)
                 for secret_key in ("access_token", "refresh_token", "id_token", "session_token", "cookie", "password"):
                     account.pop(secret_key, None)
+                account.pop("proxy", None)
+                account.pop("fp", None)
                 account["image_inflight"] = int(self._image_inflight.get(token, 0))
                 submitted_at = float(self._image_last_submitted_at.get(token, 0.0))
                 account["image_inflight_age_seconds"] = max(0, int(now_ts - submitted_at)) if submitted_at else 0
@@ -1579,6 +1644,34 @@ class AccountService:
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
             items = [dict(item) for item in self._accounts.values()]
         return {"removed": removed, "items": items}
+
+    def ensure_account_fp(self, access_token: str, candidate_fp: dict[str, str]) -> dict[str, str]:
+        """Atomically complete an account fingerprint so concurrent first use stays consistent."""
+        if not access_token:
+            return dict(candidate_fp)
+        normalized_candidate = {
+            str(key).lower(): str(value)
+            for key, value in candidate_fp.items()
+            if str(key).strip() and value is not None and str(value).strip()
+        }
+        with self._lock:
+            access_token = self._resolve_access_token_locked(access_token)
+            current = self._accounts.get(access_token)
+            if current is None:
+                return normalized_candidate
+            raw_existing = current.get("fp")
+            existing = {
+                str(key).lower(): str(value)
+                for key, value in raw_existing.items()
+                if str(key).strip() and value is not None and str(value).strip()
+            } if isinstance(raw_existing, dict) else {}
+            completed = {**normalized_candidate, **existing}
+            if completed != existing:
+                account = self._normalize_account({**current, "fp": completed})
+                if account is not None:
+                    self._accounts[access_token] = account
+                    self._save_accounts()
+            return completed
 
     def update_account(self, access_token: str, updates: dict, quiet: bool = False) -> dict | None:
         if not access_token:

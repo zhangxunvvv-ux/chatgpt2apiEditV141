@@ -257,6 +257,7 @@ class ReferencePlatformRegistrar(openai_register.PlatformRegistrar):
             "cookie": str(chatgpt_session.get("cookie") or "").strip(),
             "source_type": "web",
             "registration_engine": "reference",
+            **self._account_environment(),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 

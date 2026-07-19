@@ -494,6 +494,7 @@ class PlatformRegistrar:
         self.clearance_user_agent = ""
         self.clearance_failure_reason = ""
         self.device_id = str(uuid.uuid4())
+        self.session_id = str(uuid.uuid4())
         self.code_verifier = ""
         self.platform_auth_code = ""
         self.chatgpt_callback_url = ""
@@ -572,6 +573,49 @@ class PlatformRegistrar:
         }
         headers.update(_make_trace_headers())
         return headers
+
+    def _account_environment(self) -> dict[str, Any]:
+        """Capture the browser and egress identity used by this registration."""
+        headers = {
+            str(key).lower(): str(value)
+            for key, value in self._json_headers(f"{auth_base}/").items()
+        }
+        fp_keys = (
+            "user-agent",
+            "accept-language",
+            "sec-ch-ua",
+            "sec-ch-ua-arch",
+            "sec-ch-ua-bitness",
+            "sec-ch-ua-full-version-list",
+            "sec-ch-ua-mobile",
+            "sec-ch-ua-model",
+            "sec-ch-ua-platform",
+            "sec-ch-ua-platform-version",
+        )
+        fingerprint = {key: headers[key] for key in fp_keys if headers.get(key)}
+        chrome_version = re.search(r"Chrome/([0-9.]+)", fingerprint.get("user-agent", ""))
+        if chrome_version:
+            fingerprint["sec-ch-ua-full-version"] = f'"{chrome_version.group(1)}"'
+        fingerprint.update({
+            "impersonate": "chrome",
+            "oai-device-id": self.device_id,
+            "oai-session-id": self.session_id,
+        })
+
+        effective_proxy = self.proxy
+        if hasattr(proxy_settings, "get_profile"):
+            try:
+                effective_proxy = proxy_settings.get_profile(
+                    proxy=self.proxy,
+                    upstream=True,
+                ).proxy_url
+            except Exception:
+                pass
+        return {
+            "fp": fingerprint,
+            "proxy": str(effective_proxy or "").strip(),
+            "registration_environment_version": 1,
+        }
 
     def _refresh_cloudflare_clearance(self, target_url: str, index: int) -> ClearanceBundle | None:
         self.clearance_failure_reason = ""
@@ -660,7 +704,7 @@ class PlatformRegistrar:
         query_params = {
             "prompt": "login",
             "ext-oai-did": self.device_id,
-            "auth_session_logging_id": str(uuid.uuid4()),
+            "auth_session_logging_id": self.session_id,
             "ext-passkey-client-capabilities": "0111",
             "screen_hint": "login_or_signup",
         }
@@ -1255,6 +1299,7 @@ class PlatformRegistrar:
             "session_token": str(chatgpt_session.get("session_token") or "").strip(),
             "cookie": str(chatgpt_session.get("cookie") or "").strip(),
             "source_type": "web",
+            **self._account_environment(),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 

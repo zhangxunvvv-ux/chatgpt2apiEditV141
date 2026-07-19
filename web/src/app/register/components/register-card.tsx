@@ -1,7 +1,7 @@
 "use client";
 
 import { Activity, AlertTriangle, LoaderCircle, Plus, Play, RotateCcw, Save, Settings2, Square, Trash2, UserPlus, Zap } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -21,10 +21,9 @@ type RegisterCardProps = {
 };
 
 export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardProps) {
-  const [mobileView, setMobileView] = useState<"config" | "results" | "new">("config");
-  const [desktopResultView, setDesktopResultView] = useState<"results" | "new">("results");
+  const [mobileView, setMobileView] = useState<"config" | "results" | "new">("new");
+  const [desktopResultView, setDesktopResultView] = useState<"results" | "new">("new");
   const [isSavingNew, setIsSavingNew] = useState(false);
-  const selectedInitialMobileView = useRef(false);
   const config = useSettingsStore((state) => state.registerConfig);
   const isLoading = useSettingsStore((state) => state.isLoadingRegister);
   const isSaving = useSettingsStore((state) => state.isSavingRegister);
@@ -44,17 +43,6 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
   const toggle = useSettingsStore((state) => state.toggleRegister);
   const reset = useSettingsStore((state) => state.resetRegister);
   const resetOutlookPool = useSettingsStore((state) => state.resetOutlookPool);
-
-  useEffect(() => {
-    if (!config || !newRegister || selectedInitialMobileView.current) return;
-    selectedInitialMobileView.current = true;
-    if (newRegister.enabled) {
-      setMobileView("new");
-      setDesktopResultView("new");
-    } else {
-      setMobileView(config.enabled ? "results" : "config");
-    }
-  }, [config, newRegister]);
 
   if (isLoading) {
     return (

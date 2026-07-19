@@ -45,6 +45,11 @@ class ReferenceRegisterTests(unittest.TestCase):
         self.assertEqual(result["access_token"], "chatgpt-token")
         self.assertEqual(result["source_type"], "web")
         self.assertEqual(result["registration_engine"], "reference")
+        self.assertEqual(result["registration_environment_version"], 1)
+        self.assertEqual(result["fp"]["user-agent"], registrar._browser_user_agent())
+        self.assertEqual(result["fp"]["oai-device-id"], registrar.device_id)
+        self.assertEqual(result["fp"]["oai-session-id"], registrar.session_id)
+        self.assertEqual(result["fp"]["sec-ch-ua-mobile"], registrar._profile_mobile)
         mark_result.assert_called_once_with(mailbox, success=True)
 
     def test_direct_otp_flow_keeps_first_code_without_immediate_resend(self) -> None:

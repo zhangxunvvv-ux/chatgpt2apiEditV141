@@ -161,6 +161,8 @@ class OpenAIBackendAPI:
         self.account = account_service.get_account(self.access_token) if self.access_token else {}
         self.account = self.account if isinstance(self.account, dict) else {}
         self.fp = self._build_fp()
+        if self.access_token:
+            self.fp = account_service.ensure_account_fp(self.access_token, self.fp)
         self.user_agent = self.fp["user-agent"]
         self.device_id = self.fp["oai-device-id"]
         self.session_id = self.fp["oai-session-id"]
@@ -177,19 +179,19 @@ class OpenAIBackendAPI:
             "User-Agent": self.user_agent,
             "Origin": self.base_url,
             "Referer": self.base_url + "/",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7",
+            "Accept-Language": self.fp["accept-language"],
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
             "Priority": "u=1, i",
             "Sec-Ch-Ua": self.fp["sec-ch-ua"],
-            "Sec-Ch-Ua-Arch": '"x86"',
-            "Sec-Ch-Ua-Bitness": '"64"',
-            "Sec-Ch-Ua-Full-Version": '"143.0.3650.96"',
-            "Sec-Ch-Ua-Full-Version-List": '"Microsoft Edge";v="143.0.3650.96", "Chromium";v="143.0.7499.147", "Not A(Brand";v="24.0.0.0"',
+            "Sec-Ch-Ua-Arch": self.fp["sec-ch-ua-arch"],
+            "Sec-Ch-Ua-Bitness": self.fp["sec-ch-ua-bitness"],
+            "Sec-Ch-Ua-Full-Version": self.fp["sec-ch-ua-full-version"],
+            "Sec-Ch-Ua-Full-Version-List": self.fp["sec-ch-ua-full-version-list"],
             "Sec-Ch-Ua-Mobile": self.fp["sec-ch-ua-mobile"],
-            "Sec-Ch-Ua-Model": '""',
+            "Sec-Ch-Ua-Model": self.fp["sec-ch-ua-model"],
             "Sec-Ch-Ua-Platform": self.fp["sec-ch-ua-platform"],
-            "Sec-Ch-Ua-Platform-Version": '"19.0.0"',
+            "Sec-Ch-Ua-Platform-Version": self.fp["sec-ch-ua-platform-version"],
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
@@ -201,6 +203,7 @@ class OpenAIBackendAPI:
         })
         if self.access_token:
             self.session.headers["Authorization"] = f"Bearer {self.access_token}"
+        self._restore_account_cookies()
 
     def close(self) -> None:
         if getattr(self, "_closed", False):
@@ -232,9 +235,16 @@ class OpenAIBackendAPI:
                 "impersonate",
                 "oai-device-id",
                 "oai-session-id",
+                "accept-language",
                 "sec-ch-ua",
+                "sec-ch-ua-arch",
+                "sec-ch-ua-bitness",
+                "sec-ch-ua-full-version",
+                "sec-ch-ua-full-version-list",
                 "sec-ch-ua-mobile",
+                "sec-ch-ua-model",
                 "sec-ch-ua-platform",
+                "sec-ch-ua-platform-version",
         ):
             value = str(account.get(key) or "").strip()
             if value:
@@ -247,10 +257,34 @@ class OpenAIBackendAPI:
         fp.setdefault("impersonate", "chrome110")
         fp.setdefault("oai-device-id", new_uuid())
         fp.setdefault("oai-session-id", new_uuid())
+        fp.setdefault("accept-language", "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7")
         fp.setdefault("sec-ch-ua", '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"')
+        fp.setdefault("sec-ch-ua-arch", '"x86"')
+        fp.setdefault("sec-ch-ua-bitness", '"64"')
+        fp.setdefault("sec-ch-ua-full-version", '"143.0.3650.96"')
+        fp.setdefault(
+            "sec-ch-ua-full-version-list",
+            '"Microsoft Edge";v="143.0.3650.96", "Chromium";v="143.0.7499.147", '
+            '"Not A(Brand";v="24.0.0.0"',
+        )
         fp.setdefault("sec-ch-ua-mobile", "?0")
+        fp.setdefault("sec-ch-ua-model", '""')
         fp.setdefault("sec-ch-ua-platform", '"Windows"')
+        fp.setdefault("sec-ch-ua-platform-version", '"19.0.0"')
         return fp
+
+    def _restore_account_cookies(self) -> None:
+        cookie_header = str(self.account.get("cookie") or "").strip()
+        if not cookie_header:
+            return
+        for part in cookie_header.split(";"):
+            name, separator, value = part.strip().partition("=")
+            if not separator or not name:
+                continue
+            try:
+                self.session.cookies.set(name, value, domain=".chatgpt.com")
+            except Exception:
+                continue
 
     def _headers(self, path: str, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """构造请求头，并补上 web 端要求的 target path/route。"""
