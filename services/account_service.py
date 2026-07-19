@@ -1892,38 +1892,44 @@ class AccountService:
         if progress_id:
             self.init_refresh_progress(progress_id, len(access_tokens))
 
-        executor = ThreadPoolExecutor(max_workers=max_workers)
-        try:
-            futures = {
-                executor.submit(self.fetch_remote_info, token, "refresh_accounts", defer_invalid_removal): token
-                for token in access_tokens
-            }
-            for future in as_completed(futures):
-                token = futures[future]
-                try:
-                    account = future.result()
-                except (KeyboardInterrupt, SystemExit):
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    raise
-                except Exception as exc:
-                    error_str = str(exc)
-                    # TLS/代理连接错误是网络问题，不计入账号失败
-                    from services.protocol.conversation import is_tls_connection_error
-                    if not is_tls_connection_error(error_str):
-                        errors.append({"token": anonymize_token(token), "error": error_str})
-                else:
-                    if account is not None:
-                        refreshed += 1
-
+        def collect_result(token: str, future=None) -> None:
+            nonlocal refreshed
+            try:
+                account = (
+                    future.result()
+                    if future is not None
+                    else self.fetch_remote_info(token, "refresh_accounts", defer_invalid_removal)
+                )
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as exc:
+                error_str = str(exc)
+                # TLS/代理连接错误是网络问题，不计入账号失败
+                from services.protocol.conversation import is_tls_connection_error
+                if not is_tls_connection_error(error_str):
+                    errors.append({"token": anonymize_token(token), "error": error_str})
+            else:
+                if account is not None:
+                    refreshed += 1
+            finally:
                 if progress_id:
                     self.update_refresh_progress(progress_id, token)
+
+        try:
+            if max_workers == 1:
+                collect_result(access_tokens[0])
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(self.fetch_remote_info, token, "refresh_accounts", defer_invalid_removal): token
+                        for token in access_tokens
+                    }
+                    for future in as_completed(futures):
+                        collect_result(futures[future], future)
         except (KeyboardInterrupt, SystemExit):
             if progress_id:
                 self.finish_refresh_progress(progress_id, error="cancelled")
-            executor.shutdown(wait=False, cancel_futures=True)
             raise
-        else:
-            executor.shutdown(wait=True, cancel_futures=True)
 
         # 自动重新登录异常账号（仅当配置开启时）
         relogined = 0

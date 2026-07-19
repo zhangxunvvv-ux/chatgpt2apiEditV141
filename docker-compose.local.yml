@@ -5,6 +5,10 @@ services:
       dockerfile: Dockerfile
     image: chatgpt2api:local
     container_name: chatgpt2api-local
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     ports:
       - "8000:80"
     volumes:

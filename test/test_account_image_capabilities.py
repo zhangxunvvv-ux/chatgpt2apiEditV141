@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -13,11 +14,47 @@ from services.auth_service import AuthService
 from services.config import config
 from services.log_service import log_service
 from services.openai_backend_api import InvalidAccessTokenError
+from services.openai_backend_api import OpenAIBackendAPI
 from services.storage.json_storage import JSONStorageBackend
 from utils.helper import anonymize_token, split_image_model
 
 
 class AccountCapabilityTests(unittest.TestCase):
+    def test_single_account_refresh_does_not_create_nested_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            with (
+                patch.object(service, "fetch_remote_info", return_value={"status": "正常"}) as fetch,
+                patch("services.account_service.ThreadPoolExecutor") as executor,
+            ):
+                result = service.refresh_accounts(["test-token"])
+
+        executor.assert_not_called()
+        fetch.assert_called_once_with("test-token", "refresh_accounts", True)
+        self.assertEqual(result["refreshed"], 1)
+
+    def test_user_info_requests_stay_on_the_session_owner_thread(self) -> None:
+        backend = object.__new__(OpenAIBackendAPI)
+        backend.access_token = "test-token"
+        owner_thread = threading.get_ident()
+        calls: list[tuple[str, int]] = []
+
+        def record(name: str, result: dict):
+            def run() -> dict:
+                calls.append((name, threading.get_ident()))
+                return result
+            return run
+
+        backend._get_me = record("me", {"email": "pool@example.com", "id": "user-1"})
+        backend._get_conversation_init = record("init", {"limits_progress": [], "default_model_slug": "auto"})
+        backend._get_default_account = record("account", {"plan_type": "free"})
+
+        result = backend.get_user_info()
+
+        self.assertEqual([name for name, _ in calls], ["me", "init", "account"])
+        self.assertTrue(all(thread_id == owner_thread for _, thread_id in calls))
+        self.assertEqual(result["email"], "pool@example.com")
+
     def test_unknown_quota_accounts_are_available_only_when_not_throttled(self) -> None:
         self.assertFalse(
             AccountService._is_image_account_available(

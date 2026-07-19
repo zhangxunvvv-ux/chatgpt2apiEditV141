@@ -8,9 +8,19 @@ from pathlib import Path
 from unittest import mock
 
 from services import register_service as register_service_module
+from utils.resource_limits import fd_pressure, is_resource_exhaustion_error
 
 
 class RegisterConcurrencyTests(unittest.TestCase):
+    def test_fd_pressure_uses_bounded_threshold(self) -> None:
+        self.assertTrue(fd_pressure({"open_fds": 716, "fd_pressure_limit": 716}))
+        self.assertFalse(fd_pressure({"open_fds": 715, "fd_pressure_limit": 716}))
+
+    def test_resource_errors_are_not_confused_with_provider_delivery(self) -> None:
+        self.assertTrue(is_resource_exhaustion_error("[Errno 24] Too many open files"))
+        self.assertTrue(is_resource_exhaustion_error("curl: (6) getaddrinfo() thread failed to start"))
+        self.assertFalse(is_resource_exhaustion_error("HTTP 429"))
+
     @staticmethod
     def wait_until(predicate, timeout: float = 5.0) -> bool:
         deadline = time.monotonic() + timeout

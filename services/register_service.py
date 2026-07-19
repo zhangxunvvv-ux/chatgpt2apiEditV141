@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import gc
 import threading
 import time
 import uuid
@@ -11,6 +12,7 @@ from pathlib import Path
 from services.account_service import account_service
 from services.config import DATA_DIR
 from services.register import mail_provider, openai_register, reference_register
+from utils.resource_limits import fd_pressure, is_resource_exhaustion_error, process_fd_snapshot
 
 
 REGISTER_FILE = DATA_DIR / "register.json"
@@ -59,6 +61,11 @@ def _default_config() -> dict:
             "retry_at": None,
             "pause_reason": "",
             "scheduler_restarts": 0,
+            "open_fds": 0,
+            "fd_soft_limit": 0,
+            "fd_pressure_limit": 0,
+            "fd_usage_percent": 0,
+            "resource_pauses": 0,
         },
     }
 
@@ -476,18 +483,48 @@ class RegisterService:
         success = int(initial_stats.get("success") or 0)
         fail = int(initial_stats.get("fail") or 0)
         consecutive_failures = int(initial_stats.get("consecutive_failures") or 0)
+        resource_pauses = int(initial_stats.get("resource_pauses") or 0)
+        resource_pause_until = 0.0
+        resource_pause_logged = False
         task_index = done
         with ThreadPoolExecutor(max_workers=threads) as executor:
             futures = set()
             while True:
                 cfg = self.get()
-                while (
-                    self._is_generation_active(generation, stop_event)
-                    and len(futures) < threads
-                    and not self._target_reached(cfg, success, len(futures), generation, stop_event)
-                ):
-                    task_index += 1
-                    futures.add(executor.submit(self._engine.worker, task_index, stop_event, generation))
+                fd_snapshot = process_fd_snapshot()
+                if fd_pressure(fd_snapshot):
+                    gc.collect()
+                    fd_snapshot = process_fd_snapshot()
+                pause_seconds = max(0.0, resource_pause_until - time.monotonic())
+                under_pressure = fd_pressure(fd_snapshot)
+                resource_paused = under_pressure or pause_seconds > 0
+                wait_seconds = min(5.0, pause_seconds) if pause_seconds > 0 else 5.0
+                if resource_paused:
+                    if not resource_pause_logged:
+                        resource_pauses += 1
+                        resource_pause_logged = True
+                        self._append_log(
+                            "检测到服务器文件描述符压力，暂停派发新注册任务，等待资源回收: "
+                            f"open_fds={fd_snapshot.get('open_fds', 'unknown')}, "
+                            f"soft_limit={fd_snapshot.get('fd_soft_limit', 'unknown')}",
+                            "yellow",
+                        )
+                elif resource_pause_logged:
+                    resource_pause_logged = False
+                    self._append_log("服务器文件描述符压力已解除，恢复注册任务派发", "green")
+                if not resource_paused:
+                    while (
+                        self._is_generation_active(generation, stop_event)
+                        and len(futures) < threads
+                        and not self._target_reached(cfg, success, len(futures), generation, stop_event)
+                    ):
+                        task_index += 1
+                        futures.add(executor.submit(self._engine.worker, task_index, stop_event, generation))
+                retry_at = (
+                    datetime.fromtimestamp(time.time() + wait_seconds, tz=timezone.utc).isoformat()
+                    if resource_paused
+                    else None
+                )
                 self._bump_generation(
                     generation,
                     stop_event,
@@ -496,10 +533,18 @@ class RegisterService:
                     success=success,
                     fail=fail,
                     consecutive_failures=consecutive_failures,
+                    resource_pauses=resource_pauses,
+                    retry_at=retry_at,
+                    pause_reason="server_resource_exhausted" if resource_paused else "",
+                    **fd_snapshot,
                 )
                 if not futures:
                     if not self._is_generation_active(generation, stop_event):
                         break
+                    if resource_paused:
+                        if stop_event.wait(wait_seconds):
+                            break
+                        continue
                     if str(cfg.get("mode") or "total") == "total" and self._target_reached(
                         cfg,
                         success,
@@ -511,9 +556,16 @@ class RegisterService:
                     if stop_event.wait(max(1, int(cfg.get("check_interval") or 5))):
                         break
                     continue
-                finished, futures = wait(futures, return_when=FIRST_COMPLETED)
+                finished, futures = wait(
+                    futures,
+                    timeout=wait_seconds if resource_paused else None,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not finished:
+                    continue
                 if not self._is_current_generation(generation, stop_event):
                     continue
+                resource_failure = False
                 for future in finished:
                     try:
                         result = future.result()
@@ -522,8 +574,12 @@ class RegisterService:
                         if isinstance(result, dict) and int(result.get("generation") or generation) != generation:
                             continue
                         ok = bool(isinstance(result, dict) and result.get("ok"))
+                        resource_failure = resource_failure or bool(
+                            isinstance(result, dict) and is_resource_exhaustion_error(result.get("error"))
+                        )
                     except Exception as error:
                         ok = False
+                        resource_failure = resource_failure or is_resource_exhaustion_error(error)
                         self._append_log(
                             f"注册工作线程异常（{type(error).__name__}），已计为失败并继续调度",
                             "red",
@@ -535,6 +591,13 @@ class RegisterService:
                     else:
                         fail += 1
                         consecutive_failures += 1
+                if resource_failure:
+                    gc.collect()
+                    resource_pause_until = max(resource_pause_until, time.monotonic() + 15)
+                    self._append_log(
+                        "检测到服务器资源耗尽错误，暂停派发 15 秒；该错误不作为邮箱域名投递失败处理",
+                        "yellow",
+                    )
                 self._bump_generation(
                     generation,
                     stop_event,
@@ -543,6 +606,8 @@ class RegisterService:
                     success=success,
                     fail=fail,
                     consecutive_failures=consecutive_failures,
+                    resource_pauses=resource_pauses,
+                    **process_fd_snapshot(),
                 )
         if not self._is_current_generation(generation, stop_event):
             return

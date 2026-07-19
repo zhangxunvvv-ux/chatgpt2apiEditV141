@@ -89,6 +89,10 @@ services:
     image: chatgpt2api:warp
     container_name: chatgpt2api-warp
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     depends_on:
       init-config:
         condition: service_completed_successfully
