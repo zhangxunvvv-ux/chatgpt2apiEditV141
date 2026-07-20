@@ -553,7 +553,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
         role="tabpanel"
         aria-label="运行结果"
         className={cn(
-          "min-h-0 flex-col p-4 pb-24 xl:pb-4",
+          "min-h-0 flex-col overflow-y-auto p-4 pb-24 overscroll-contain xl:overflow-hidden xl:pb-4",
           mobileView === "results" ? "flex" : "hidden",
           desktopResultView === "results" ? "xl:flex" : "xl:hidden",
         )}
@@ -574,7 +574,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
                 </Badge>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <div className="flex snap-x gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:grid sm:grid-cols-4 sm:overflow-visible sm:pb-0" aria-label="原注册运行指标，手机端可横向滑动">
               {[
                 ["成功 / 成功率", `${stats.success} / ${stats.success_rate || 0}%`],
                 ["失败", stats.fail],
@@ -587,7 +587,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
                 ["连续失败", stats.consecutive_failures || 0],
                 ["调度自恢复", stats.scheduler_restarts || 0],
               ].map(([label, value]) => (
-                <div key={label} className="border border-stone-200 bg-white/70 px-3 py-2">
+                <div key={label} className="min-w-[8.5rem] shrink-0 snap-start rounded-xl border border-stone-200 bg-white/70 px-3 py-2 sm:min-w-0">
                   <div className="text-xs text-stone-400">{label}</div>
                   <div className="mt-1 text-base font-semibold text-stone-800">{value}</div>
                 </div>
@@ -613,7 +613,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
             </div>
         </div>
 
-        <div className="mt-4 flex min-h-0 flex-1 flex-col space-y-3 overflow-hidden border-t border-stone-200 pt-4">
+        <div className="mt-4 flex min-h-56 flex-1 shrink-0 flex-col space-y-3 border-t border-stone-200 pt-4 xl:min-h-0 xl:shrink">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-semibold text-stone-900">实时日志</h3>
@@ -623,14 +623,14 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
                 {logs.length}
               </Badge>
             </div>
-            <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto border border-stone-200 bg-white/70 p-3 font-mono text-xs leading-6">
+            <div data-testid="register-log-list" className="min-h-0 flex-1 touch-pan-y overflow-x-hidden overflow-y-auto overscroll-contain rounded-xl border border-stone-200 bg-white/70 p-3 font-mono text-xs leading-5">
               {logs.length === 0 ? (
                 <div className="text-stone-500">暂无日志</div>
               ) : (
                 logs.slice().reverse().map((item, index) => (
-                  <div key={`${item.time}-${index}`} className={item.level === "red" ? "text-rose-600" : item.level === "green" ? "text-emerald-700" : item.level === "yellow" ? "text-amber-700" : "text-stone-700"}>
-                    <span className="text-stone-400">{new Date(item.time).toLocaleTimeString()}</span>
-                    <span className="break-words pl-2 [overflow-wrap:anywhere]">{item.text}</span>
+                  <div key={`${item.time}-${index}`} className={cn("grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 border-b border-stone-100 py-1.5 last:border-0", item.level === "red" ? "text-rose-600" : item.level === "green" ? "text-emerald-700" : item.level === "yellow" ? "text-amber-700" : "text-stone-700")}>
+                    <span className="tabular-nums text-stone-400">{new Date(item.time).toLocaleTimeString()}</span>
+                    <span className="min-w-0 break-words [overflow-wrap:anywhere]">{item.text}</span>
                   </div>
                 ))
               )}
@@ -643,7 +643,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
         role="tabpanel"
         aria-label="新注册"
         className={cn(
-          "min-h-0 flex-col p-4 pb-24 xl:pb-4",
+          "min-h-0 flex-col overflow-y-auto p-4 pb-24 overscroll-contain xl:overflow-hidden xl:pb-4",
           mobileView === "new" ? "flex" : "hidden",
           desktopResultView === "new" ? "xl:flex" : "xl:hidden",
         )}
@@ -674,7 +674,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
             新流程使用随机桌面/移动设备画像和带 login_hint 的 URL 驱动注册；邮箱读取、Sentinel/SO Token、账号入池继续使用本项目现有实现。
           </div>
 
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <div className="flex snap-x gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:grid sm:grid-cols-4 sm:overflow-visible sm:pb-0" aria-label="新注册运行指标，手机端可横向滑动">
             {[
               ["成功 / 成功率", `${newStats.success} / ${newStats.success_rate || 0}%`],
               ["失败", newStats.fail],
@@ -685,7 +685,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
               ["连续失败", newStats.consecutive_failures || 0],
               ["调度自恢复", newStats.scheduler_restarts || 0],
             ].map(([label, value]) => (
-              <div key={label} className="border border-stone-200 bg-white/70 px-3 py-2">
+              <div key={label} className="min-w-[8.5rem] shrink-0 snap-start rounded-xl border border-stone-200 bg-white/70 px-3 py-2 sm:min-w-0">
                 <div className="text-xs text-stone-400">{label}</div>
                 <div className="mt-1 text-base font-semibold text-stone-800">{value}</div>
               </div>
@@ -704,7 +704,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
           </div>
         </div>
 
-        <div className="mt-4 flex min-h-0 flex-1 flex-col space-y-3 overflow-hidden border-t border-stone-200 pt-4">
+        <div className="mt-4 flex min-h-56 flex-1 shrink-0 flex-col space-y-3 border-t border-stone-200 pt-4 xl:min-h-0 xl:shrink">
           <div className="flex items-center justify-between">
             <div>
               <h3 className="text-sm font-semibold text-stone-900">新注册实时日志</h3>
@@ -712,14 +712,14 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
             </div>
             <Badge variant="secondary" className="rounded-md">{newLogs.length}</Badge>
           </div>
-          <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto border border-stone-200 bg-white/70 p-3 font-mono text-xs leading-6">
+          <div data-testid="new-register-log-list" className="min-h-0 flex-1 touch-pan-y overflow-x-hidden overflow-y-auto overscroll-contain rounded-xl border border-stone-200 bg-white/70 p-3 font-mono text-xs leading-5">
             {newLogs.length === 0 ? (
               <div className="text-stone-500">暂无新注册日志</div>
             ) : (
               newLogs.slice().reverse().map((item, index) => (
-                <div key={`${item.time}-${index}`} className={item.level === "red" ? "text-rose-600" : item.level === "green" ? "text-emerald-700" : item.level === "yellow" ? "text-amber-700" : "text-stone-700"}>
-                  <span className="text-stone-400">{new Date(item.time).toLocaleTimeString()}</span>
-                  <span className="break-words pl-2 [overflow-wrap:anywhere]">{item.text}</span>
+                <div key={`${item.time}-${index}`} className={cn("grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 border-b border-stone-100 py-1.5 last:border-0", item.level === "red" ? "text-rose-600" : item.level === "green" ? "text-emerald-700" : item.level === "yellow" ? "text-amber-700" : "text-stone-700")}>
+                  <span className="tabular-nums text-stone-400">{new Date(item.time).toLocaleTimeString()}</span>
+                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">{item.text}</span>
                 </div>
               ))
             )}
