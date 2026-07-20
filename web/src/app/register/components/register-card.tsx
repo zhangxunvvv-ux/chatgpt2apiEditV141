@@ -89,7 +89,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
       type,
       enable: true,
       ...(type === "cloudmail_gen" ? { api_base: "", admin_email: "", admin_password: "", domain: [], subdomain: [], email_prefix: "" } : {}),
-      ...(type === "cloudflare_temp_email" ? { api_base: "", admin_password: "", domain: [], subdomain: [], subdomain_levels: [], append_random_suffix: true, random_subdomain_depth: 1 } : {}),
+      ...(type === "cloudflare_temp_email" ? { api_base: "", admin_password: "", domain: [], subdomain: [], subdomain_levels: [], fixed_address: "", append_random_suffix: true, random_subdomain_depth: 1 } : {}),
       ...(type === "tempmail_lol" ? { api_key: "", domain: [] } : {}),
       ...(type === "moemail" ? { api_base: "", api_key: "", domain: [] } : {}),
       ...(type === "inbucket" ? { api_base: "", domain: [], random_subdomain: true } : {}),
@@ -213,6 +213,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
             <div className="space-y-3">
               {providers.map((provider, index) => {
                 const type = String(provider.type || "tempmail_lol");
+                const fixedAddress = String(provider.fixed_address || "");
                 const domains = Array.isArray(provider.domain) ? provider.domain.map(String).join("\n") : "";
                 const subdomains = Array.isArray(provider.subdomain) ? provider.subdomain.map(String).join("\n") : String(provider.subdomain || "");
                 const savedLevels = Array.isArray(provider.subdomain_levels) ? provider.subdomain_levels.map(String) : [];
@@ -424,6 +425,23 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
                         </div>
                       );
                     })() : null}
+
+                    {type === "cloudflare_temp_email" ? (
+                      <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50/70 p-3">
+                        <label className="text-sm font-medium text-amber-950">指定完整邮箱（测试用，可选）</label>
+                        <Input
+                          type="email"
+                          value={fixedAddress}
+                          onChange={(event) => updateProvider(index, { fixed_address: event.target.value.trim() })}
+                          placeholder="例如 test@edu.example.com"
+                          className="h-10 rounded-xl border-amber-200 bg-white font-mono"
+                          disabled={config.enabled}
+                        />
+                        <p className="text-xs leading-5 text-amber-800">
+                          填写后优先使用这个完整地址：已有邮箱直接获取 JWT，不存在则关闭前缀后精确创建。测试时请将线程数和注册总数都设为 1，避免同一邮箱的验证码互相覆盖；留空继续使用下方随机 N 级域名。
+                        </p>
+                      </div>
+                    ) : null}
 
                     {type === "cloudmail_gen" || type === "cloudflare_temp_email" || type === "tempmail_lol" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "ddg_mail" ? (
                       <div className="space-y-2">

@@ -119,6 +119,7 @@ def _normalize(raw: dict) -> dict:
                         provider.pop(key, None)
                 elif provider.get("type") == "cloudflare_temp_email":
                     provider.pop("rate_limit_cooldown_seconds", None)
+                    provider["fixed_address"] = str(provider.get("fixed_address") or "").strip()
                     provider["append_random_suffix"] = _safe_bool(provider.get("append_random_suffix"), True)
                     levels = provider.get("subdomain_levels")
                     if isinstance(levels, list):

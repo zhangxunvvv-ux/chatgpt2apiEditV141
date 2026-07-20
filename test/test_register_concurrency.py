@@ -77,6 +77,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
                             "type": "cloudflare_temp_email",
                             "enable": True,
                             "subdomain_levels": ["sfsfe", "grtwrwe"],
+                            "fixed_address": "  exact@team.example.test  ",
                         }
                     ]
                 }
@@ -85,6 +86,7 @@ class RegisterConcurrencyTests(unittest.TestCase):
 
         provider = config["mail"]["providers"][0]
         self.assertIs(provider["append_random_suffix"], True)
+        self.assertEqual(provider["fixed_address"], "exact@team.example.test")
 
         config["mail"]["providers"][0]["append_random_suffix"] = False
         normalized = register_service_module._normalize(config)

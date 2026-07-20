@@ -30,6 +30,8 @@ class FakeSession:
 class CloudflareTempMailNoCooldownTests(unittest.TestCase):
     def tearDown(self):
         mail_provider.provider_log_sink = None
+        with mail_provider.fixed_mailbox_lock:
+            mail_provider.fixed_mailbox_reservations.clear()
 
     @staticmethod
     def provider(session: FakeSession):
@@ -178,6 +180,94 @@ class CloudflareTempMailNoCooldownTests(unittest.TestCase):
             provider.create_mailbox("user")
 
         self.assertEqual(session.calls[0]["json"]["domain"], "team.mail.example.test")
+
+    def test_fixed_address_reuses_existing_mailbox(self):
+        session = FakeSession([FakeResponse(200, {"address": "exact@team.example.test", "jwt": "mail-token"})])
+        entry = {
+            "provider_ref": "cloudflare-test",
+            "api_base": "https://mail.example.test",
+            "admin_password": "secret",
+            "domain": ["example.test"],
+            "fixed_address": "exact@team.example.test",
+        }
+        conf = {"request_timeout": 30, "wait_timeout": 30, "wait_interval": 2, "user_agent": "test", "proxy": ""}
+        with mock.patch.object(mail_provider, "_create_session", return_value=session):
+            provider = mail_provider.CloudflareTempMailProvider(entry, conf)
+            mailbox = provider.create_mailbox()
+
+        self.assertTrue(session.calls[0]["url"].endswith("/admin/get_address"))
+        self.assertEqual(session.calls[0]["json"], {"address": "exact@team.example.test"})
+        self.assertEqual(mailbox["address"], "exact@team.example.test")
+        self.assertTrue(mailbox["fixed_address"])
+        mail_provider.mark_mailbox_result(mailbox, success=False, error="test complete")
+        self.assertFalse(mail_provider.fixed_mailbox_reservations)
+
+    def test_fixed_address_is_created_exactly_when_missing(self):
+        session = FakeSession([
+            FakeResponse(404, text="not found"),
+            FakeResponse(200, {"address": "exact@team.example.test", "jwt": "mail-token"}),
+        ])
+        entry = {
+            "provider_ref": "cloudflare-test",
+            "api_base": "https://mail.example.test",
+            "admin_password": "secret",
+            "domain": ["example.test"],
+            "fixed_address": "exact@team.example.test",
+        }
+        conf = {"request_timeout": 30, "wait_timeout": 30, "wait_interval": 2, "user_agent": "test", "proxy": ""}
+        with mock.patch.object(mail_provider, "_create_session", return_value=session):
+            provider = mail_provider.CloudflareTempMailProvider(entry, conf)
+            mailbox = provider.create_mailbox()
+
+        self.assertEqual(len(session.calls), 2)
+        self.assertTrue(session.calls[1]["url"].endswith("/admin/new_address"))
+        self.assertEqual(session.calls[1]["json"], {
+            "enablePrefix": False,
+            "name": "exact",
+            "domain": "team.example.test",
+        })
+        self.assertEqual(mailbox["address"], "exact@team.example.test")
+        mail_provider.release_mailbox(mailbox)
+
+    def test_fixed_address_rejects_concurrent_registration_until_release(self):
+        first_session = FakeSession([FakeResponse(200, {"address": "exact@example.test", "jwt": "first-token"})])
+        second_session = FakeSession([FakeResponse(200, {"address": "exact@example.test", "jwt": "second-token"})])
+        entry = {
+            "provider_ref": "cloudflare-test",
+            "api_base": "https://mail.example.test",
+            "admin_password": "secret",
+            "domain": ["example.test"],
+            "fixed_address": "exact@example.test",
+        }
+        conf = {"request_timeout": 30, "wait_timeout": 30, "wait_interval": 2, "user_agent": "test", "proxy": ""}
+        with mock.patch.object(mail_provider, "_create_session", side_effect=[first_session, second_session]):
+            first = mail_provider.CloudflareTempMailProvider(entry, conf)
+            second = mail_provider.CloudflareTempMailProvider(entry, conf)
+            mailbox = first.create_mailbox()
+            with self.assertRaisesRegex(RuntimeError, "正在被其他注册任务使用"):
+                second.create_mailbox()
+            mail_provider.release_mailbox(mailbox)
+            second_mailbox = second.create_mailbox()
+
+        self.assertEqual(second_mailbox["token"], "second-token")
+        mail_provider.release_mailbox(second_mailbox)
+
+    def test_fixed_address_validation_happens_before_api_request(self):
+        session = FakeSession([])
+        entry = {
+            "provider_ref": "cloudflare-test",
+            "api_base": "https://mail.example.test",
+            "admin_password": "secret",
+            "domain": ["example.test"],
+            "fixed_address": "not-an-email",
+        }
+        conf = {"request_timeout": 30, "wait_timeout": 30, "wait_interval": 2, "user_agent": "test", "proxy": ""}
+        with mock.patch.object(mail_provider, "_create_session", return_value=session):
+            provider = mail_provider.CloudflareTempMailProvider(entry, conf)
+            with self.assertRaisesRegex(RuntimeError, "格式无效"):
+                provider.create_mailbox()
+
+        self.assertFalse(session.calls)
 
     def test_wait_for_code_scans_all_list_messages_without_detail_requests(self):
         session = FakeSession(
