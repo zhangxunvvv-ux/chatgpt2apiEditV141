@@ -182,7 +182,10 @@ class CloudflareTempMailNoCooldownTests(unittest.TestCase):
         self.assertEqual(session.calls[0]["json"]["domain"], "team.mail.example.test")
 
     def test_fixed_address_reuses_existing_mailbox(self):
-        session = FakeSession([FakeResponse(200, {"address": "exact@team.example.test", "jwt": "mail-token"})])
+        session = FakeSession([
+            FakeResponse(200, {"results": [{"id": 17, "name": "exact@team.example.test"}], "count": 1}),
+            FakeResponse(200, {"jwt": "mail-token"}),
+        ])
         entry = {
             "provider_ref": "cloudflare-test",
             "api_base": "https://mail.example.test",
@@ -195,8 +198,13 @@ class CloudflareTempMailNoCooldownTests(unittest.TestCase):
             provider = mail_provider.CloudflareTempMailProvider(entry, conf)
             mailbox = provider.create_mailbox()
 
-        self.assertTrue(session.calls[0]["url"].endswith("/admin/get_address"))
-        self.assertEqual(session.calls[0]["json"], {"address": "exact@team.example.test"})
+        self.assertTrue(session.calls[0]["url"].endswith("/admin/address"))
+        self.assertEqual(session.calls[0]["params"], {
+            "limit": 100,
+            "offset": 0,
+            "query": "exact@team.example.test",
+        })
+        self.assertTrue(session.calls[1]["url"].endswith("/admin/show_password/17"))
         self.assertEqual(mailbox["address"], "exact@team.example.test")
         self.assertTrue(mailbox["fixed_address"])
         mail_provider.mark_mailbox_result(mailbox, success=False, error="test complete")
@@ -204,7 +212,7 @@ class CloudflareTempMailNoCooldownTests(unittest.TestCase):
 
     def test_fixed_address_is_created_exactly_when_missing(self):
         session = FakeSession([
-            FakeResponse(404, text="not found"),
+            FakeResponse(200, {"results": [], "count": 0}),
             FakeResponse(200, {"address": "exact@team.example.test", "jwt": "mail-token"}),
         ])
         entry = {
@@ -229,9 +237,38 @@ class CloudflareTempMailNoCooldownTests(unittest.TestCase):
         self.assertEqual(mailbox["address"], "exact@team.example.test")
         mail_provider.release_mailbox(mailbox)
 
+    def test_fixed_address_recovers_when_create_reports_already_exists(self):
+        session = FakeSession([
+            FakeResponse(200, {"results": [], "count": 0}),
+            FakeResponse(400, text="Failed to create address: Address already exists"),
+            FakeResponse(200, {"results": [{"id": 23, "name": "exact@team.example.test"}], "count": 1}),
+            FakeResponse(200, {"jwt": "existing-token"}),
+        ])
+        entry = {
+            "provider_ref": "cloudflare-test",
+            "api_base": "https://mail.example.test",
+            "admin_password": "secret",
+            "domain": ["example.test"],
+            "fixed_address": "exact@team.example.test",
+        }
+        conf = {"request_timeout": 30, "wait_timeout": 30, "wait_interval": 2, "user_agent": "test", "proxy": ""}
+        with mock.patch.object(mail_provider, "_create_session", return_value=session):
+            provider = mail_provider.CloudflareTempMailProvider(entry, conf)
+            mailbox = provider.create_mailbox()
+
+        self.assertEqual(mailbox["token"], "existing-token")
+        self.assertEqual(len(session.calls), 4)
+        mail_provider.release_mailbox(mailbox)
+
     def test_fixed_address_rejects_concurrent_registration_until_release(self):
-        first_session = FakeSession([FakeResponse(200, {"address": "exact@example.test", "jwt": "first-token"})])
-        second_session = FakeSession([FakeResponse(200, {"address": "exact@example.test", "jwt": "second-token"})])
+        first_session = FakeSession([
+            FakeResponse(200, {"results": [{"id": 1, "name": "exact@example.test"}], "count": 1}),
+            FakeResponse(200, {"jwt": "first-token"}),
+        ])
+        second_session = FakeSession([
+            FakeResponse(200, {"results": [{"id": 1, "name": "exact@example.test"}], "count": 1}),
+            FakeResponse(200, {"jwt": "second-token"}),
+        ])
         entry = {
             "provider_ref": "cloudflare-test",
             "api_base": "https://mail.example.test",

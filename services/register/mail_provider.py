@@ -693,14 +693,54 @@ class CloudflareTempMailProvider(BaseMailProvider):
             mailbox["_fixed_mailbox_reservation"] = reservation_key
             mailbox["fixed_address"] = True
             return mailbox
-        except Exception:
+        except Exception as exc:
+            if self._last_status_code == 400 and "address already exists" in str(exc).lower():
+                try:
+                    mailbox = self.get_existing_mailbox(address)
+                except Exception:
+                    mailbox = None
+                if mailbox is not None:
+                    mailbox["_fixed_mailbox_reservation"] = reservation_key
+                    mailbox["fixed_address"] = True
+                    return mailbox
             with fixed_mailbox_lock:
                 fixed_mailbox_reservations.discard(reservation_key)
             raise
 
     def get_existing_mailbox(self, email: str) -> dict[str, Any]:
         """通过管理员密码获取已有邮箱地址的 JWT，用于查询邮件。"""
-        data = self._request("POST", "/admin/get_address", headers={"x-admin-auth": self.admin_password}, payload={"address": email})
+        query_data = self._request(
+            "GET",
+            "/admin/address",
+            headers={"x-admin-auth": self.admin_password},
+            params={"limit": 100, "offset": 0, "query": email},
+        )
+        results = query_data.get("results")
+        if not isinstance(results, list):
+            raise RuntimeError("CloudflareTempMail address lookup returned an invalid response")
+        target = email.strip().lower()
+        matched = next(
+            (
+                item
+                for item in results
+                if isinstance(item, dict)
+                and str(item.get("name") or item.get("address") or "").strip().lower() == target
+            ),
+            None,
+        )
+        if matched is None:
+            # Preserve the existing create-on-404 branch without treating API errors as absence.
+            self._last_status_code = 404
+            raise RuntimeError("CloudflareTempMail fixed address was not found")
+        address_id = str(matched.get("id") or "").strip()
+        if not address_id:
+            raise RuntimeError("CloudflareTempMail existing address is missing its id")
+        token_data = self._request(
+            "GET",
+            f"/admin/show_password/{address_id}",
+            headers={"x-admin-auth": self.admin_password},
+        )
+        data = {"address": email, "jwt": token_data.get("jwt")}
         address = str(data.get("address") or "").strip()
         token = str(data.get("jwt") or "").strip()
         if not address or not token:
