@@ -154,7 +154,7 @@ def text_with_url_citations(result: dict[str, Any]) -> tuple[str, list[dict[str,
 
 
 def run_web_search(query: str) -> dict[str, Any]:
-    token = account_service.get_text_access_token()
+    token = account_service.get_text_access_token(source_type="default")
     result = OpenAIBackendAPI(token).search(query)
     account_service.mark_text_used(token)
     return result

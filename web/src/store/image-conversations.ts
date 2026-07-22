@@ -2,7 +2,7 @@
 
 import localforage from "localforage";
 
-import type { ImageModel } from "@/lib/api";
+import type { AccountPool, ImageModel } from "@/lib/api";
 
 export type ImageConversationMode = "generate" | "edit";
 
@@ -53,6 +53,7 @@ export type ImageTurn = {
   id: string;
   prompt: string;
   model: ImageModel;
+  accountPool: AccountPool;
   mode: ImageConversationMode;
   referenceImages: StoredReferenceImage[];
   count: number;
@@ -206,6 +207,7 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
     id: String(turn.id || `${Date.now()}`),
     prompt: String(turn.prompt || ""),
     model: (turn.model as ImageModel) || "gpt-image-2",
+    accountPool: turn.accountPool === "gptfree" ? "gptfree" : "default",
     mode: turn.mode === "edit" ? "edit" : "generate",
     referenceImages: getLegacyReferenceImages(turn),
     count: Math.max(1, Number(turn.count || normalizedImages.length || 1)),

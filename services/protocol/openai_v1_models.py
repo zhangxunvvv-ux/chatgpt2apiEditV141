@@ -41,7 +41,10 @@ def _fetch_upstream_models() -> dict[str, Any]:
     attempted_tokens: set[str] = set()
     for _attempt in range(MAX_AUTH_MODEL_ATTEMPTS):
         try:
-            access_token = account_service.get_text_access_token(set(attempted_tokens))
+            access_token = account_service.get_text_access_token(
+                set(attempted_tokens),
+                source_type="default",
+            )
         except Exception:
             continue
         if not access_token or access_token in attempted_tokens:

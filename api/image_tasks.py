@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
@@ -18,6 +20,7 @@ class ImageGenerationTaskRequest(BaseModel):
     size: str | None = None
     quality: str = "auto"
     batch_size: int = Field(default=1, ge=1, le=10)
+    account_pool: Literal["default", "gptfree"] = "default"
 
 
 class ResumePollRequest(BaseModel):
@@ -67,6 +70,7 @@ def create_router() -> APIRouter:
                 quality=body.quality,
                 base_url=resolve_image_base_url(request),
                 batch_size=body.batch_size,
+                account_pool=body.account_pool,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
@@ -99,6 +103,7 @@ def create_router() -> APIRouter:
                 images=images,
                 masks=masks,
                 batch_size=int(payload.get("batch_size") or 1),
+                account_pool=str(payload.get("account_pool") or "default"),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc

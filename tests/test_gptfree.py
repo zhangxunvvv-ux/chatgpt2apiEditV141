@@ -23,7 +23,7 @@ from services.gptfree_identity_service import (
 )
 from services.gptfree_response_service import GptFreeResponseService, _upstream_body
 from services.storage.json_storage import JSONStorageBackend
-from utils.helper import is_image_chat_request, split_image_model
+from utils.helper import gptfree_upstream_model, is_image_chat_request, split_image_model
 
 
 def _b64url(value: object) -> str:
@@ -139,16 +139,38 @@ class GptFreeRoutingTests(unittest.TestCase):
                 service.get_text_access_token(source_type="gptfree", refresh=False),
                 "gptfree-token",
             )
+            self.assertEqual(
+                service.get_text_access_token(source_type="default", refresh=False),
+                "web-token",
+            )
+            default_image_tokens = service._list_ready_candidate_tokens(source_type="default")
+            self.assertEqual(default_image_tokens, [])
+
+            storage.save_accounts([
+                {"access_token": "web-token", "source_type": "web", "status": "正常", "quota": 1},
+                {"access_token": "gptfree-token", "source_type": "gptfree", "status": "正常", "quota": 1},
+            ])
+            service = AccountService(storage)
+            self.assertEqual(service._list_ready_candidate_tokens(source_type="default"), ["web-token"])
+            self.assertEqual(service._list_ready_candidate_tokens(source_type="gptfree"), ["gptfree-token"])
 
     def test_gptfree_model_routes_text_and_image_explicitly(self) -> None:
         self.assertEqual(split_image_model("gptfree"), (None, "gpt-image-2"))
         self.assertFalse(is_image_chat_request({"model": "gptfree"}))
         self.assertTrue(is_image_chat_request({"model": "gptfree", "modalities": ["image"]}))
         self.assertFalse(is_image_chat_request({"model": "gptfree/gpt-5.6-sol", "modalities": ["image"]}))
-        payload = _upstream_body({"model": "gptfree", "input": "hello", "stream": False})
+        payload = _upstream_body({
+            "model": "gptfree",
+            "input": "hello",
+            "stream": False,
+            "account_pool": "gptfree",
+        })
         self.assertEqual(payload["model"], "gpt-5.6-sol")
         self.assertTrue(payload["stream"])
         self.assertFalse(payload["store"])
+        self.assertNotIn("account_pool", payload)
+        self.assertEqual(gptfree_upstream_model("auto"), "gpt-5.6-sol")
+        self.assertEqual(gptfree_upstream_model("gpt-5-6-Luna"), "gpt-5.6-luna")
 
     def test_responses_use_agent_assertion_without_web_token(self) -> None:
         captured: dict[str, object] = {}

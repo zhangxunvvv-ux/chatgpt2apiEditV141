@@ -141,12 +141,22 @@ def is_gptfree_model(model: object) -> bool:
 
 def gptfree_upstream_model(model: object, default: str = "gpt-5.6-sol") -> str:
     normalized = str(model or "").strip()
-    if normalized.lower() == GPTFREE_MODEL:
+    key = normalized.lower()
+    if key in {"", "auto", GPTFREE_MODEL}:
         return default
-    if normalized.lower().startswith(f"{GPTFREE_MODEL}/"):
+    if key.startswith(f"{GPTFREE_MODEL}/"):
         value = normalized.split("/", 1)[1].strip()
-        return value or default
-    return normalized or default
+        key = value.lower()
+        normalized = value
+    aliases = {
+        "gpt-5-6-sol": "gpt-5.6-sol",
+        "gpt-5-6-luna": "gpt-5.6-luna",
+        "gpt-5-6-terra": "gpt-5.6-terra",
+        "gpt-5.6-sol": "gpt-5.6-sol",
+        "gpt-5.6-luna": "gpt-5.6-luna",
+        "gpt-5.6-terra": "gpt-5.6-terra",
+    }
+    return aliases.get(key, normalized or default)
 
 
 def image_upstream_model(model: object) -> str:

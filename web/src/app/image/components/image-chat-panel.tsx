@@ -182,7 +182,10 @@ export function ImageChatPanel({
         if (!active) return;
         const textModels = data.data
           .map((item) => String(item.id || "").trim())
-          .filter((id) => id && !id.toLowerCase().includes("image"));
+          .filter((id) => {
+            const normalized = id.toLowerCase();
+            return id && !normalized.includes("image") && normalized !== "gptfree" && !normalized.startsWith("gptfree/");
+          });
         setModels(Array.from(new Set([...DEFAULT_CHAT_MODELS, ...textModels])));
       })
       .catch(() => {
@@ -279,6 +282,7 @@ export function ImageChatPanel({
           model: effectiveModel,
           messages: requestMessages,
           stream: true,
+          account_pool: config.accountPool,
           ...(config.reasoningEffort !== "default" ? { reasoning_effort: config.reasoningEffort } : {}),
         },
         controller.signal,
@@ -534,6 +538,15 @@ export function ImageChatPanel({
         ) : null}
         <div className="mt-2 flex items-center justify-end gap-1.5">
           <div className="flex min-w-0 items-center justify-end gap-1.5">
+            <Select value={config.accountPool} onValueChange={(value) => onConfigChange({ accountPool: value as ImageChatConfig["accountPool"] })}>
+              <SelectTrigger className="h-9 w-[100px] rounded-xl border-stone-200 bg-white px-2 text-xs shadow-none sm:w-[116px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">默认号池</SelectItem>
+                <SelectItem value="gptfree">gptFree号池</SelectItem>
+              </SelectContent>
+            </Select>
             <Select value={config.model} onValueChange={(value) => onConfigChange({ model: value })}>
               <SelectTrigger className="h-9 w-[104px] rounded-xl border-stone-200 bg-white px-2 text-xs shadow-none sm:w-[128px]">
                 <SelectValue />

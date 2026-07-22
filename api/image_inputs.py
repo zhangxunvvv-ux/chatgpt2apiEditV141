@@ -70,6 +70,13 @@ def _parse_batch_size(value: object) -> int:
     return batch_size
 
 
+def _parse_account_pool(value: object) -> str:
+    account_pool = _clean(value, "default").lower()
+    if account_pool not in {"default", "gptfree"}:
+        raise HTTPException(status_code=400, detail={"error": "account_pool must be default or gptfree"})
+    return account_pool
+
+
 def _payload_from_fields(fields: dict[str, Any]) -> dict[str, Any]:
     """构造图片编辑载荷：从表单或 JSON 字段提取通用参数。"""
     prompt = _clean(fields.get("prompt"))
@@ -84,6 +91,7 @@ def _payload_from_fields(fields: dict[str, Any]) -> dict[str, Any]:
         "response_format": _clean(fields.get("response_format"), "b64_json"),
         "stream": _parse_bool(fields.get("stream")),
         "batch_size": _parse_batch_size(fields.get("batch_size")),
+        "account_pool": _parse_account_pool(fields.get("account_pool")),
     }
     if "client_task_id" in fields:
         payload["client_task_id"] = _clean(fields.get("client_task_id"))
@@ -194,7 +202,7 @@ async def parse_image_edit_request(request: Request) -> tuple[dict[str, Any], li
 
     form = await request.form()
     fields: dict[str, Any] = {}
-    for key in ("client_task_id", "prompt", "model", "n", "size", "quality", "response_format", "stream", "batch_size"):
+    for key in ("client_task_id", "prompt", "model", "n", "size", "quality", "response_format", "stream", "batch_size", "account_pool"):
         value = form.get(key)
         if isinstance(value, str):
             fields[key] = value

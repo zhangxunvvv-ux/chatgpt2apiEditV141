@@ -688,8 +688,8 @@ def conversation_events(
     yield from iter_conversation_payloads(payloads, history_text, history_messages)
 
 
-def text_backend() -> OpenAIBackendAPI:
-    return OpenAIBackendAPI(access_token=account_service.get_text_access_token())
+def text_backend(source_type: str = "default") -> OpenAIBackendAPI:
+    return OpenAIBackendAPI(access_token=account_service.get_text_access_token(source_type=source_type))
 
 
 def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
@@ -727,7 +727,10 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
                     token = refreshed_token
                 else:
                     account_service.remove_invalid_token(token, "text_stream")
-                    token = account_service.get_text_access_token(attempted_tokens)
+                    token = account_service.get_text_access_token(
+                        attempted_tokens,
+                        source_type=request.source_type or "default",
+                    )
                 if token:
                     continue
             raise
@@ -1280,7 +1283,7 @@ def _generate_single_image(
             plan_type, _ = split_image_model(request.model)
             codex_model = is_codex_image_model(request.model)
             source_type = request.source_type or (
-                "gptfree" if is_gptfree_model(request.model) else ("codex" if codex_model else None)
+                "gptfree" if is_gptfree_model(request.model) else ("codex" if codex_model else "default")
             )
             token = account_service.get_available_access_token(
                 plan_type=plan_type,

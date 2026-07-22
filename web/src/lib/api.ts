@@ -3,6 +3,7 @@ import { httpRequest, request } from "@/lib/request";
 export type AccountType = string;
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = string;
+export type AccountPool = "default" | "gptfree";
 export type AuthRole = "admin" | "user";
 export type ImageStorageMode = "local" | "webdav" | "both";
 
@@ -590,7 +591,7 @@ export async function generateImage(prompt: string, model?: ImageModel, size?: s
   );
 }
 
-export async function editImage(files: File | File[], prompt: string, model?: ImageModel, size?: string, quality = "auto") {
+export async function editImage(files: File | File[], prompt: string, model?: ImageModel, size?: string, quality = "auto", accountPool: AccountPool = "default") {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
 
@@ -606,6 +607,7 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   }
   formData.append("quality", quality);
   formData.append("n", "1");
+  formData.append("account_pool", accountPool);
 
   return httpRequest<ImageResponse>(
     "/v1/images/edits",
@@ -616,7 +618,7 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   );
 }
 
-export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto", batchSize = 1) {
+export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto", batchSize = 1, accountPool: AccountPool = "default") {
   return httpRequest<ImageTask>("/api/image-tasks/generations", {
     method: "POST",
     body: {
@@ -626,6 +628,7 @@ export async function createImageGenerationTask(clientTaskId: string, prompt: st
       ...(size ? { size } : {}),
       quality,
       batch_size: batchSize,
+      account_pool: accountPool,
     },
   });
 }
@@ -639,6 +642,7 @@ export async function createImageEditTask(
   quality = "auto",
   masks: File[] = [],
   batchSize = 1,
+  accountPool: AccountPool = "default",
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -659,6 +663,7 @@ export async function createImageEditTask(
   }
   formData.append("quality", quality);
   formData.append("batch_size", String(batchSize));
+  formData.append("account_pool", accountPool);
 
   return httpRequest<ImageTask>("/api/image-tasks/edits", {
     method: "POST",

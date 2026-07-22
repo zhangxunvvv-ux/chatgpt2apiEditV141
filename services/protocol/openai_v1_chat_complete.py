@@ -124,11 +124,17 @@ def stream_text_chat_completion(
     messages: list[dict[str, Any]],
     model: str,
     thinking_effort: str = "",
+    source_type: str = "default",
 ) -> Iterator[dict[str, Any]]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     sent_role = False
-    request = ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)
+    request = ConversationRequest(
+        model=model,
+        messages=messages,
+        thinking_effort=thinking_effort,
+        source_type=source_type,
+    )
     for delta_text in stream_text_deltas(backend, request):
         if not sent_role:
             sent_role = True
@@ -294,12 +300,14 @@ def image_result_content(result: dict[str, Any]) -> str:
 
 def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
     model, prompt, n, images = chat_image_args(body)
+    source_type = "gptfree" if model.strip().lower() == "gptfree" else str(body.get("account_pool") or "default").strip().lower()
     result = collect_image_outputs(stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
         n=n,
         response_format="b64_json",
         images=encode_images(images) or None,
+        source_type=source_type,
     )))
     response = completion_response(model, image_result_content(result), int(result.get("created") or 0) or None)
     usage = image_usage(
@@ -313,12 +321,14 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
 
 def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     model, prompt, n, images = chat_image_args(body)
+    source_type = "gptfree" if model.strip().lower() == "gptfree" else str(body.get("account_pool") or "default").strip().lower()
     image_outputs = stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
         n=n,
         response_format="b64_json",
         images=encode_images(images) or None,
+        source_type=source_type,
     ))
     yield from stream_image_chat_completion(image_outputs, model)
 
@@ -350,11 +360,12 @@ def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: st
 
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
+    account_pool = str(body.get("account_pool") or "default").strip().lower()
     if body.get("stream"):
         if is_image_chat_request(body):
             return image_chat_events(body)
         model, messages = text_chat_parts(body)
-        if is_gptfree_request_model(model):
+        if account_pool == "gptfree" or is_gptfree_request_model(model):
             return stream_gptfree_chat_completion(body, messages)
         if is_web_search_chat_request(body) and not has_unsupported_tools(body, WEB_SEARCH_TOOL_TYPES):
             return stream_web_search_chat_completion(messages, model)
@@ -362,12 +373,18 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         key = cache_key(body, messages, stream=True)
         return chat_completion_cache.get_or_compute_stream(
             key,
-            lambda: stream_text_chat_completion(text_backend(), messages, model, thinking_effort),
+            lambda: stream_text_chat_completion(
+                text_backend("default"),
+                messages,
+                model,
+                thinking_effort,
+                "default",
+            ),
         )
     if is_image_chat_request(body):
         return image_chat_response(body)
     model, messages = text_chat_parts(body)
-    if is_gptfree_request_model(model):
+    if account_pool == "gptfree" or is_gptfree_request_model(model):
         content = collect_chat_content(stream_gptfree_chat_completion(body, messages))
         return completion_response(model, content, messages=messages)
     if is_web_search_chat_request(body) and not has_unsupported_tools(body, WEB_SEARCH_TOOL_TYPES):
@@ -378,7 +395,15 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         key,
         lambda: completion_response(
             model,
-            collect_text(text_backend(), ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)),
+            collect_text(
+                text_backend("default"),
+                ConversationRequest(
+                    model=model,
+                    messages=messages,
+                    thinking_effort=thinking_effort,
+                    source_type="default",
+                ),
+            ),
             messages=messages,
         ),
     )

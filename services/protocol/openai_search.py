@@ -7,7 +7,7 @@ MODEL = SEARCH_MODEL
 
 
 def handle(body: dict[str, object]) -> dict[str, object]:
-    token = account_service.get_text_access_token()
+    token = account_service.get_text_access_token(source_type="default")
     account = account_service.get_account(token) or {}
     backend = OpenAIBackendAPI(token)
     try:

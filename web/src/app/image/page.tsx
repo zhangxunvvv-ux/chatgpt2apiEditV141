@@ -33,6 +33,7 @@ import {
   stopImageTask,
   uploadMaterialLibraryItem,
   type Account,
+  type AccountPool,
   type ImageModel,
   type Model,
   type ImageTask,
@@ -63,10 +64,12 @@ const IMAGE_RATIO_STORAGE_KEY = "chatgpt2api:image_last_ratio";
 const IMAGE_TIER_STORAGE_KEY = "chatgpt2api:image_last_tier";
 const IMAGE_QUALITY_STORAGE_KEY = "chatgpt2api:image_last_quality";
 const IMAGE_MODEL_STORAGE_KEY = "chatgpt2api:image_last_model";
+const IMAGE_ACCOUNT_POOL_STORAGE_KEY = "chatgpt2api:image_account_pool";
 const IMAGE_COUNT_STORAGE_KEY = "chatgpt2api:image_last_count";
 const CHAT_MODEL_STORAGE_KEY = "chatgpt2api:image_chat_model";
 const CHAT_CUSTOM_MODEL_STORAGE_KEY = "chatgpt2api:image_chat_custom_model";
 const CHAT_REASONING_STORAGE_KEY = "chatgpt2api:image_chat_reasoning";
+const CHAT_ACCOUNT_POOL_STORAGE_KEY = "chatgpt2api:chat_account_pool";
 const SCROLL_POSITIONS_STORAGE_KEY = "chatgpt2api:image_scroll_positions";
 const IMAGE_SELECTED_PROMPTS_STORAGE_KEY = "chatgpt2api:image_selected_prompt_ids";
 const IMAGE_SELECTED_MATERIALS_STORAGE_KEY = "chatgpt2api:image_selected_material_ids";
@@ -136,8 +139,12 @@ function formatConversationTime(value: string) {
   }).format(date);
 }
 
-function formatAvailableQuota(accounts: Account[]) {
-  const availableAccounts = accounts.filter((account) => account.status !== "禁用");
+function formatAvailableQuota(accounts: Account[], accountPool: AccountPool) {
+  const availableAccounts = accounts.filter((account) => {
+    const sourceType = String(account.source_type || "web").trim().toLowerCase();
+    const matchesPool = accountPool === "gptfree" ? sourceType === "gptfree" : sourceType !== "gptfree";
+    return matchesPool && account.status !== "禁用";
+  });
   return String(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
 }
 
@@ -232,7 +239,7 @@ function addReferenceMarkupInstructions(
 function filterImageModels(items: Model[]): ImageModel[] {
   return items
     .map((item) => String(item.id || "").trim())
-    .filter((id, index, list) => (id.toLowerCase().includes("image") || id.toLowerCase() === "gptfree") && list.indexOf(id) === index);
+    .filter((id, index, list) => id.toLowerCase().includes("image") && list.indexOf(id) === index);
 }
 
 function normalizeStoredImageModel(value: string | null, availableModels: ImageModel[]): ImageModel {
@@ -588,7 +595,6 @@ async function recoverConversationHistory(items: ImageConversation[]) {
 
 
 function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
-  const didLoadQuotaRef = useRef(false);
   const conversationsRef = useRef<ImageConversation[]>([]);
   const loadCancelledRef = useRef(false);
   const resultsViewportRef = useRef<HTMLDivElement>(null);
@@ -614,6 +620,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const [imageHeight, setImageHeight] = useState("1024");
   const [imageQuality, setImageQuality] = useState("auto");
   const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-2");
+  const [imageAccountPool, setImageAccountPool] = useState<AccountPool>("default");
   const [imageModels, setImageModels] = useState<ImageModel[]>(["gpt-image-2"]);
   const [promptLibraryItems, setPromptLibraryItems] = useState<PromptLibraryItem[]>([]);
   const [materialLibraryItems, setMaterialLibraryItems] = useState<MaterialLibraryItem[]>([]);
@@ -623,6 +630,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     model: "auto",
     customModel: "",
     reasoningEffort: "default",
+    accountPool: "default",
   });
   const [isChatCollapsed, setIsChatCollapsed] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<"image" | "chat">("image");
@@ -704,6 +712,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       model: window.localStorage.getItem(CHAT_MODEL_STORAGE_KEY) || "auto",
       customModel: window.localStorage.getItem(CHAT_CUSTOM_MODEL_STORAGE_KEY) || "",
       reasoningEffort: window.localStorage.getItem(CHAT_REASONING_STORAGE_KEY) || "default",
+      accountPool: window.localStorage.getItem(CHAT_ACCOUNT_POOL_STORAGE_KEY) === "gptfree" ? "gptfree" : "default",
     });
   }, []);
 
@@ -714,6 +723,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         window.localStorage.setItem(CHAT_MODEL_STORAGE_KEY, next.model);
         window.localStorage.setItem(CHAT_CUSTOM_MODEL_STORAGE_KEY, next.customModel);
         window.localStorage.setItem(CHAT_REASONING_STORAGE_KEY, next.reasoningEffort);
+        window.localStorage.setItem(CHAT_ACCOUNT_POOL_STORAGE_KEY, next.accountPool);
       } catch {
         // localStorage may be full or unavailable.
       }
@@ -846,12 +856,15 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_QUALITY_STORAGE_KEY) : null;
       const storedCount =
         typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_COUNT_STORAGE_KEY) : null;
+      const storedAccountPool =
+        typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_ACCOUNT_POOL_STORAGE_KEY) : null;
       setImageRatio(storedRatio || "1:1");
       setImageTier(storedTier || "1k");
       setImageWidth("1024");
       setImageHeight("1024");
       setImageQuality(storedQuality || "auto");
       setImageCount(storedCount ? clampImageCount(storedCount) : "1");
+      setImageAccountPool(storedAccountPool === "gptfree" ? "gptfree" : "default");
 
       const items = await listImageConversations();
       const normalizedItems = await recoverConversationHistory(items);
@@ -883,6 +896,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     setImageHeight,
     setImageQuality,
     setImageCount,
+    setImageAccountPool,
     setConversations,
     setSelectedConversationId,
     setIsLoadingHistory,
@@ -957,18 +971,13 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     }
     try {
       const data = await fetchAccounts();
-      setAvailableQuota(formatAvailableQuota(data.items));
+      setAvailableQuota(formatAvailableQuota(data.items, imageAccountPool));
     } catch {
       setAvailableQuota((prev) => (prev === "加载中..." ? "--" : prev));
     }
-  }, [isAdmin]);
+  }, [imageAccountPool, isAdmin]);
 
   useEffect(() => {
-    if (didLoadQuotaRef.current) {
-      return;
-    }
-    didLoadQuotaRef.current = true;
-
     const handleFocus = () => {
       void loadQuota();
     };
@@ -978,7 +987,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     return () => {
       window.removeEventListener("focus", handleFocus);
     };
-  }, [isAdmin, loadQuota]);
+  }, [loadQuota]);
 
   // 切换会话时保存旧会话滚动位置，并隐藏容器防止闪烁
   useLayoutEffect(() => {
@@ -1093,7 +1102,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     window.localStorage.setItem(IMAGE_TIER_STORAGE_KEY, imageTier);
     window.localStorage.setItem(IMAGE_QUALITY_STORAGE_KEY, imageQuality);
     window.localStorage.setItem(IMAGE_MODEL_STORAGE_KEY, imageModel);
-  }, [imageRatio, imageTier, imageQuality, imageModel]);
+    window.localStorage.setItem(IMAGE_ACCOUNT_POOL_STORAGE_KEY, imageAccountPool);
+  }, [imageRatio, imageTier, imageQuality, imageModel, imageAccountPool]);
 
   useEffect(() => {
     if (typeof window !== "undefined" && parsedCount > 0) {
@@ -1457,6 +1467,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     setImageHeight(parsedSize.height);
     setImageQuality(turn.quality);
     setImageModel(turn.model);
+    setImageAccountPool(turn.accountPool);
     setReferenceImages(turn.referenceImages);
     setReferenceImageFiles(
       turn.referenceImages.map((image) => dataUrlToFile(image.dataUrl, image.name, image.type)),
@@ -1572,8 +1583,17 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                   activeTurn.quality,
                   referencePayload.maskFiles,
                   activeTurn.images.length,
+                  activeTurn.accountPool,
                 )
-              : createImageGenerationTask(taskId, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality, activeTurn.images.length);
+              : createImageGenerationTask(
+                  taskId,
+                  activeTurn.prompt,
+                  activeTurn.model,
+                  activeTurn.size,
+                  activeTurn.quality,
+                  activeTurn.images.length,
+                  activeTurn.accountPool,
+                );
           }),
         );
         await applyTasks(submitted);
@@ -1631,8 +1651,17 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                         activeTurn.quality,
                         referencePayload.maskFiles,
                         activeTurn.images.length,
+                        activeTurn.accountPool,
                       )
-                    : createImageGenerationTask(image.taskId || image.id, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality, activeTurn.images.length),
+                    : createImageGenerationTask(
+                        image.taskId || image.id,
+                        activeTurn.prompt,
+                        activeTurn.model,
+                        activeTurn.size,
+                        activeTurn.quality,
+                        activeTurn.images.length,
+                        activeTurn.accountPool,
+                      ),
                 ),
               );
               if (resubmitted.length > 0) {
@@ -1704,6 +1733,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         id: nextTurnId,
         prompt: sourceTurn.prompt,
         model: sourceTurn.model,
+        accountPool: sourceTurn.accountPool,
         mode: sourceTurn.mode,
         referenceImages: sourceTurn.referenceImages,
         count,
@@ -1987,6 +2017,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       id: turnId,
       prompt: finalPrompt,
       model: imageModel,
+      accountPool: imageAccountPool,
       mode: effectiveImageMode,
       referenceImages: effectiveImageMode === "edit" ? combinedReferenceImages : [],
       count: parsedCount,
@@ -2164,6 +2195,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             imageQuality={imageQuality}
             imageModel={imageModel}
             imageModels={imageModels}
+            accountPool={imageAccountPool}
             chatConfig={chatConfig}
             promptLibraryItems={promptLibraryItems}
             materialLibraryItems={materialLibraryItems}
@@ -2182,6 +2214,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             onImageHeightChange={setImageHeight}
             onImageQualityChange={setImageQuality}
             onImageModelChange={setImageModel}
+            onAccountPoolChange={setImageAccountPool}
             onTogglePromptSelection={togglePromptSelection}
             onToggleMaterialSelection={toggleMaterialSelection}
             onSubmit={handleSubmit}

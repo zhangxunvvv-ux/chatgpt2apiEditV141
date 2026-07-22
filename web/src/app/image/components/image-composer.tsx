@@ -29,6 +29,7 @@ type ImageComposerProps = {
   imageQuality: string;
   imageModel: ImageModel;
   imageModels: ImageModel[];
+  accountPool: "default" | "gptfree";
   chatConfig: ImageChatConfig;
   promptLibraryItems: PromptLibraryItem[];
   materialLibraryItems: MaterialLibraryItem[];
@@ -47,6 +48,7 @@ type ImageComposerProps = {
   onImageHeightChange: (value: string) => void;
   onImageQualityChange: (value: string) => void;
   onImageModelChange: (value: ImageModel) => void;
+  onAccountPoolChange: (value: "default" | "gptfree") => void;
   onTogglePromptSelection: (id: string) => void;
   onToggleMaterialSelection: (id: string) => void;
   onSubmit: () => void | Promise<void>;
@@ -109,6 +111,7 @@ export function ImageComposer({
   imageQuality,
   imageModel,
   imageModels,
+  accountPool,
   chatConfig,
   promptLibraryItems,
   materialLibraryItems,
@@ -127,6 +130,7 @@ export function ImageComposer({
   onImageHeightChange,
   onImageQualityChange,
   onImageModelChange,
+  onAccountPoolChange,
   onTogglePromptSelection,
   onToggleMaterialSelection,
   onSubmit,
@@ -152,7 +156,8 @@ export function ImageComposer({
   );
   const qualityLabel = qualityOptions.find((option) => option.value === imageQuality)?.label || "自动";
   const ratioLabel = imageRatio === "auto" ? "auto" : `${imageRatio}(${imageTier})`;
-  const imageSizeLabel = `${qualityLabel} · ${ratioLabel} · ${imageCount || 1} 张`;
+  const poolLabel = accountPool === "gptfree" ? "gptFree号池" : "默认号池";
+  const imageSizeLabel = `${poolLabel} · ${qualityLabel} · ${ratioLabel} · ${imageCount || 1} 张`;
   const selectedModelLabel = modelOptions.find((option) => option.value === imageModel)?.label || imageModel;
   const isCodexModel = imageModel.toLowerCase().includes("codex");
   const selectedPromptCount = selectedPromptIds.length;
@@ -397,6 +402,7 @@ export function ImageComposer({
             },
           ],
           stream: true,
+          account_pool: chatConfig.accountPool,
           ...(chatConfig.reasoningEffort !== "default" ? { reasoning_effort: chatConfig.reasoningEffort } : {}),
         },
         controller.signal,
@@ -556,7 +562,7 @@ export function ImageComposer({
                     className="min-h-28 resize-none rounded-xl border-stone-200 bg-white text-sm leading-6 shadow-none"
                   />
                   <div className="mt-2 text-xs leading-5 text-stone-500">
-                    当前模型：{getEffectiveChatModel(chatConfig)}，思考：{chatConfig.reasoningEffort === "default" ? "默认" : chatConfig.reasoningEffort}
+                    当前号池：{chatConfig.accountPool === "gptfree" ? "gptFree" : "默认"}，模型：{getEffectiveChatModel(chatConfig)}，思考：{chatConfig.reasoningEffort === "default" ? "默认" : chatConfig.reasoningEffort}
                   </div>
                 </PopoverContent>
               </Popover>
@@ -639,6 +645,21 @@ export function ImageComposer({
                         }}
                       >
                         <h3 className="mb-3 text-base font-semibold text-stone-950">图像设置</h3>
+                        <div className="mb-3">
+                          <div className="mb-2 text-sm font-medium text-stone-900">账号池</div>
+                          <Select
+                            value={accountPool}
+                            onValueChange={(value) => onAccountPoolChange(value as "default" | "gptfree")}
+                          >
+                            <SelectTrigger className="h-10 rounded-xl border-stone-200 bg-white text-sm shadow-none">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent className="z-[120]">
+                              <SelectItem value="default">默认号池</SelectItem>
+                              <SelectItem value="gptfree">gptFree号池</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
                         <div className="mb-3">
                           <div className="mb-2 text-sm font-medium text-stone-900">模型</div>
                           <Select

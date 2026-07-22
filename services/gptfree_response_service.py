@@ -50,7 +50,7 @@ def _upstream_body(body: dict[str, Any]) -> dict[str, Any]:
         effort = str(payload.get("reasoning_effort") or payload.get("thinking_effort") or "").strip().lower()
         if effort:
             payload["reasoning"] = {"effort": "xhigh" if effort == "extended" else effort}
-    for key in ("n", "prompt", "modalities", "reasoning_effort", "thinking_effort"):
+    for key in ("n", "prompt", "modalities", "reasoning_effort", "thinking_effort", "account_pool"):
         payload.pop(key, None)
     return payload
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
@@ -30,6 +32,7 @@ class ImageGenerationRequest(BaseModel):
     response_format: str = "b64_json"
     history_disabled: bool = True
     stream: bool | None = None
+    account_pool: Literal["default", "gptfree"] = "default"
 
 
 class ChatCompletionRequest(BaseModel):
@@ -40,6 +43,7 @@ class ChatCompletionRequest(BaseModel):
     stream: bool | None = None
     modalities: list[str] | None = None
     messages: list[dict[str, object]] | None = None
+    account_pool: Literal["default", "gptfree"] = "default"
 
 
 class ResponseCreateRequest(BaseModel):
@@ -49,6 +53,7 @@ class ResponseCreateRequest(BaseModel):
     tools: list[dict[str, object]] | None = None
     tool_choice: object | None = None
     stream: bool | None = None
+    account_pool: Literal["default", "gptfree"] = "default"
 
 
 class AnthropicMessageRequest(BaseModel):

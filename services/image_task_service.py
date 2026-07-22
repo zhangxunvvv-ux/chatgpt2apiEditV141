@@ -152,6 +152,7 @@ class ImageTaskService:
         quality: str = "auto",
         base_url: str = "",
         batch_size: int = 1,
+        account_pool: str = "default",
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
@@ -162,6 +163,7 @@ class ImageTaskService:
             "response_format": "url",
             "base_url": base_url,
             "_batch_size": max(1, int(batch_size or 1)),
+            "account_pool": _clean(account_pool, "default"),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="generate", payload=payload)
 
@@ -178,6 +180,7 @@ class ImageTaskService:
         images: list[tuple[bytes, str, str]] | None = None,
         masks: list[tuple[bytes, str, str]] | None = None,
         batch_size: int = 1,
+        account_pool: str = "default",
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
@@ -190,6 +193,7 @@ class ImageTaskService:
             "response_format": "url",
             "base_url": base_url,
             "_batch_size": max(1, int(batch_size or 1)),
+            "account_pool": _clean(account_pool, "default"),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload)
 

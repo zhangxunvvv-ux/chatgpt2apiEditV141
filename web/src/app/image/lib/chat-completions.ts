@@ -7,14 +7,11 @@ export type ImageChatConfig = {
   model: string;
   customModel: string;
   reasoningEffort: string;
+  accountPool: "default" | "gptfree";
 };
 
 export const DEFAULT_CHAT_MODELS = [
   "auto",
-  "gptfree",
-  "gptfree/gpt-5.6-sol",
-  "gptfree/gpt-5.6-luna",
-  "gptfree/gpt-5.6-terra",
   "gpt-5-6-sol",
   "gpt-5-6-Luna",
   "gpt-5-5",

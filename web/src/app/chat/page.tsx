@@ -10,12 +10,14 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 const CHAT_MODEL_STORAGE_KEY = "chatgpt2api:image_chat_model";
 const CHAT_CUSTOM_MODEL_STORAGE_KEY = "chatgpt2api:image_chat_custom_model";
 const CHAT_REASONING_STORAGE_KEY = "chatgpt2api:image_chat_reasoning";
+const CHAT_ACCOUNT_POOL_STORAGE_KEY = "chatgpt2api:chat_account_pool";
 
 function ChatPageContent() {
   const [chatConfig, setChatConfig] = useState<ImageChatConfig>({
     model: "auto",
     customModel: "",
     reasoningEffort: "default",
+    accountPool: "default",
   });
 
   useEffect(() => {
@@ -24,6 +26,7 @@ function ChatPageContent() {
         model: window.localStorage.getItem(CHAT_MODEL_STORAGE_KEY) || "auto",
         customModel: window.localStorage.getItem(CHAT_CUSTOM_MODEL_STORAGE_KEY) || "",
         reasoningEffort: window.localStorage.getItem(CHAT_REASONING_STORAGE_KEY) || "default",
+        accountPool: window.localStorage.getItem(CHAT_ACCOUNT_POOL_STORAGE_KEY) === "gptfree" ? "gptfree" : "default",
       });
     } catch {
       // localStorage may be unavailable.
@@ -37,6 +40,7 @@ function ChatPageContent() {
         window.localStorage.setItem(CHAT_MODEL_STORAGE_KEY, next.model);
         window.localStorage.setItem(CHAT_CUSTOM_MODEL_STORAGE_KEY, next.customModel);
         window.localStorage.setItem(CHAT_REASONING_STORAGE_KEY, next.reasoningEffort);
+        window.localStorage.setItem(CHAT_ACCOUNT_POOL_STORAGE_KEY, next.accountPool);
       } catch {
         // localStorage may be full or unavailable.
       }

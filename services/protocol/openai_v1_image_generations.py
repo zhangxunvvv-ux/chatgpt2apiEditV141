@@ -22,6 +22,11 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     base_url = str(body.get("base_url") or "") or None
     progress_callback = body.get("progress_callback")
     cancel_event = body.get("cancel_event")
+    account_pool = (
+        "gptfree"
+        if model.strip().lower() == "gptfree"
+        else str(body.get("account_pool") or "").strip().lower() or None
+    )
     outputs = stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
@@ -33,6 +38,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         message_as_error=True,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
+        source_type=account_pool,
     ))
     if body.get("stream"):
         return stream_image_chunks(outputs)

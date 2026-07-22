@@ -169,7 +169,11 @@ class AccountService:
     def _account_matches_source_type(cls, account: dict, source_type: str | None = None) -> bool:
         if not source_type:
             return True
-        return cls._normalize_source_type(account.get("source_type")) == cls._normalize_source_type(source_type)
+        normalized_source = cls._normalize_source_type(source_type)
+        normalized_account = cls._normalize_source_type(account.get("source_type"))
+        if normalized_source == "default":
+            return normalized_account != "gptfree"
+        return normalized_account == normalized_source
 
     @classmethod
     def _account_matches_any_plan_type(cls, account: dict, plan_types: set[str] | tuple[str, ...] | None = None) -> bool:
