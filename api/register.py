@@ -151,8 +151,14 @@ def create_router() -> APIRouter:
         return {"register": gptfree_register_snapshot()}
 
     @router.post("/api/register/gptfree/start")
-    async def start_gptfree_register(authorization: str | None = Header(default=None)):
+    async def start_gptfree_register(
+            body: RegisterConfigRequest | None = None,
+            authorization: str | None = Header(default=None),
+    ):
         require_admin(authorization)
+        updates = body.model_dump(exclude_none=True) if body is not None else None
+        if updates:
+            register_service.update(updates)
         gptfree_register_service.start(register_service.shared_config_snapshot())
         return {"register": gptfree_register_snapshot()}
 

@@ -22,6 +22,7 @@ from services.gptfree_identity_service import (
     validate_access_token,
 )
 from services.gptfree_response_service import GptFreeResponseService, _upstream_body
+from services.register import gptfree_register, openai_register
 from services.storage.json_storage import JSONStorageBackend
 from utils.helper import gptfree_upstream_model, is_image_chat_request, split_image_model
 
@@ -126,6 +127,27 @@ class GptFreeIdentityTests(unittest.TestCase):
 
 
 class GptFreeRoutingTests(unittest.TestCase):
+    def test_registration_worker_passes_shared_mail_snapshot_to_reference_flow(self) -> None:
+        mail_config = {
+            "providers": [{
+                "type": "cloudflare_temp_email",
+                "enable": True,
+                "domain": ["example.test"],
+                "subdomain_levels": ["one", "two"],
+                "append_random_suffix": True,
+            }],
+        }
+        with (
+            patch.dict(gptfree_register.config, {"proxy": "", "mail": mail_config}, clear=False),
+            patch.object(gptfree_register.reference_register, "ReferencePlatformRegistrar") as registrar_factory,
+        ):
+            registrar_factory.return_value.register.side_effect = openai_register.RegistrationStopped("stopped")
+            result = gptfree_register.worker(1, generation=9)
+
+        self.assertTrue(result["cancelled"])
+        call = registrar_factory.call_args
+        self.assertEqual(call.kwargs["mail_config"]["providers"][0]["subdomain_levels"], ["one", "two"])
+
     def test_text_pool_filters_source_type_without_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

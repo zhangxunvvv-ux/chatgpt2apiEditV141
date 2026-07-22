@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import random
 import re
@@ -252,11 +253,17 @@ def _truthy(value: object, fallback: bool = True) -> bool:
     return fallback
 
 
-def _mail_config(register_proxy: str = "") -> dict:
-    mail = config["mail"] if isinstance(config.get("mail"), dict) else {}
+def _mail_config(register_proxy: str = "", mail_config: dict | None = None) -> dict:
+    mail = mail_config if isinstance(mail_config, dict) else (
+        config["mail"] if isinstance(config.get("mail"), dict) else {}
+    )
     use_register_proxy = _truthy(mail.get("api_use_register_proxy"), False)
     proxy = str(register_proxy or "").strip() if use_register_proxy else ""
-    return {**mail, "api_use_register_proxy": use_register_proxy, "proxy": proxy}
+    return {
+        **copy.deepcopy(mail),
+        "api_use_register_proxy": use_register_proxy,
+        "proxy": proxy,
+    }
 
 
 def _authorize_landed_page(resp) -> str:
@@ -280,16 +287,25 @@ def _authorize_landed_page(resp) -> str:
     return ""
 
 
-def create_mailbox(username: str | None = None, register_proxy: str = "") -> dict:
-    return mail_provider.create_mailbox(_mail_config(register_proxy), username)
+def create_mailbox(
+    username: str | None = None,
+    register_proxy: str = "",
+    mail_config: dict | None = None,
+) -> dict:
+    return mail_provider.create_mailbox(_mail_config(register_proxy, mail_config), username)
 
 
 def wait_for_code(
     mailbox: dict,
     register_proxy: str = "",
     stop_event: threading.Event | None = None,
+    mail_config: dict | None = None,
 ) -> str | None:
-    return mail_provider.wait_for_code(_mail_config(register_proxy), mailbox, stop_event=stop_event)
+    return mail_provider.wait_for_code(
+        _mail_config(register_proxy, mail_config),
+        mailbox,
+        stop_event=stop_event,
+    )
 
 
 def build_sentinel_token(
@@ -487,9 +503,15 @@ def request_platform_oauth_token(session: requests.Session, code: str, code_veri
 
 
 class PlatformRegistrar:
-    def __init__(self, proxy: str = "", stop_event: threading.Event | None = None) -> None:
+    def __init__(
+        self,
+        proxy: str = "",
+        stop_event: threading.Event | None = None,
+        mail_config: dict | None = None,
+    ) -> None:
         self.proxy = str(proxy or "").strip()
         self.stop_event = stop_event
+        self.mail_config = _mail_config(self.proxy, mail_config)
         self.session = create_session(self.proxy)
         self.clearance_user_agent = ""
         self.clearance_failure_reason = ""
@@ -1029,7 +1051,7 @@ class PlatformRegistrar:
         step(index, "开始发送验证码")
         if mailbox is not None:
             try:
-                mail_provider.prepare_code_baseline(_mail_config(self.proxy), mailbox)
+                mail_provider.prepare_code_baseline(self.mail_config, mailbox)
                 step(index, "发送验证码前邮箱基线已记录")
             except Exception as exc:
                 step(index, f"邮箱基线记录失败，继续发送验证码: {str(exc)[:160]}", "yellow")
@@ -1057,7 +1079,7 @@ class PlatformRegistrar:
     def _resend_signup_otp(self, index: int, mailbox: dict[str, Any]) -> None:
         self._ensure_active()
         try:
-            mail_provider.prepare_code_baseline(_mail_config(self.proxy), mailbox)
+            mail_provider.prepare_code_baseline(self.mail_config, mailbox)
             step(index, "重发验证码前邮箱基线已记录")
         except Exception as exc:
             step(index, f"邮箱基线记录失败，继续重发验证码: {str(exc)[:160]}", "yellow")
@@ -1131,7 +1153,7 @@ class PlatformRegistrar:
 
     def _prepare_signup_code_baseline(self, mailbox: dict[str, Any], index: int) -> None:
         try:
-            mail_provider.prepare_code_baseline(_mail_config(self.proxy), mailbox)
+            mail_provider.prepare_code_baseline(self.mail_config, mailbox)
             step(index, "提交注册邮箱前邮箱基线已记录")
         except Exception as exc:
             step(index, f"邮箱基线记录失败，继续提交注册邮箱: {str(exc)[:160]}", "yellow")
@@ -1155,7 +1177,12 @@ class PlatformRegistrar:
         for attempt in range(1, max_attempts + 1):
             self._ensure_active()
             step(index, f"开始等待注册验证码（第 {attempt}/{max_attempts} 次）")
-            code = wait_for_code(mailbox, register_proxy=self.proxy, stop_event=self.stop_event)
+            code = wait_for_code(
+                mailbox,
+                register_proxy=self.proxy,
+                stop_event=self.stop_event,
+                mail_config=self.mail_config,
+            )
             self._ensure_active()
             if not code:
                 if attempt >= max_attempts:
@@ -1237,7 +1264,7 @@ class PlatformRegistrar:
     def register(self, index: int) -> dict:
         self._ensure_active()
         step(index, "开始创建邮箱")
-        mailbox = create_mailbox(register_proxy=self.proxy)
+        mailbox = create_mailbox(register_proxy=self.proxy, mail_config=self.mail_config)
         self._ensure_active()
         email = str(mailbox.get("address") or "").strip()
         if not email:
@@ -1306,7 +1333,11 @@ class PlatformRegistrar:
 
 def worker(index: int, stop_event: threading.Event | None = None, generation: int = 0) -> dict:
     start = time.time()
-    registrar = PlatformRegistrar(config["proxy"], stop_event=stop_event)
+    registrar = PlatformRegistrar(
+        config["proxy"],
+        stop_event=stop_event,
+        mail_config=config["mail"],
+    )
     try:
         step(index, f"任务启动 generation={generation}")
         result = registrar.register(index)

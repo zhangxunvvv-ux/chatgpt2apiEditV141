@@ -8,14 +8,24 @@ from services.register import openai_register, reference_register
 
 class ReferenceRegisterTests(unittest.TestCase):
     def test_password_flow_uses_login_hint_and_reference_otp_sender(self) -> None:
+        mail_config = {
+            "providers": [{
+                "type": "cloudflare_temp_email",
+                "enable": True,
+                "domain": ["example.test"],
+                "subdomain_levels": ["level-one", "level-two"],
+                "append_random_suffix": True,
+            }],
+        }
         mailbox = {
             "address": "user@example.test",
             "label": "shared-provider",
             "provider": "test",
         }
-        registrar = reference_register.ReferencePlatformRegistrar("")
+        registrar = reference_register.ReferencePlatformRegistrar("", mail_config=mail_config)
+        mail_config["providers"][0]["subdomain_levels"] = ["mutated-after-start"]
         with (
-            mock.patch.object(openai_register, "create_mailbox", return_value=mailbox),
+            mock.patch.object(openai_register, "create_mailbox", return_value=mailbox) as create_mailbox,
             mock.patch.object(openai_register.mail_provider, "mark_mailbox_result") as mark_result,
             mock.patch.object(registrar, "_chatgpt_authorize") as authorize,
             mock.patch.object(
@@ -36,6 +46,10 @@ class ReferenceRegisterTests(unittest.TestCase):
             result = registrar.register(1)
 
         registrar.close()
+        create_mailbox.assert_called_once()
+        runtime_mail = create_mailbox.call_args.kwargs["mail_config"]
+        self.assertEqual(runtime_mail["providers"][0]["subdomain_levels"], ["level-one", "level-two"])
+        self.assertTrue(runtime_mail["providers"][0]["append_random_suffix"])
         authorize.assert_called_once_with("user@example.test", 1, include_login_hint=True)
         signup.assert_called_once_with("user@example.test", 1, screen_hint="login_or_signup")
         register_user.assert_called_once()
@@ -121,7 +135,7 @@ class ReferenceRegisterTests(unittest.TestCase):
         mailbox = {"address": "user@example.test"}
 
         with (
-            mock.patch.object(openai_register, "wait_for_code", return_value="111111"),
+            mock.patch.object(openai_register, "wait_for_code", return_value="111111") as wait_for_code,
             mock.patch.object(registrar, "_request_otp_validation", return_value=(rejected, "")) as validate,
             mock.patch.object(registrar, "_resend_signup_otp") as resend,
         ):
@@ -130,6 +144,7 @@ class ReferenceRegisterTests(unittest.TestCase):
 
         registrar.close()
         validate.assert_called_once_with("111111", 4)
+        self.assertIs(wait_for_code.call_args.kwargs["mail_config"], registrar.mail_config)
         resend.assert_not_called()
 
     def test_authorize_landing_on_email_verification_skips_duplicate_email_submission(self) -> None:

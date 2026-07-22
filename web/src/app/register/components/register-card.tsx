@@ -101,7 +101,18 @@ export function RegisterCard({ newRegister, onNewRegisterChange, gptFreeRegister
     if (!gptFreeRegister) return;
     setIsSavingGptFree(true);
     try {
-      const data = gptFreeRegister.enabled ? await stopGptFreeRegister() : await startGptFreeRegister();
+      const data = gptFreeRegister.enabled
+        ? await stopGptFreeRegister()
+        : await startGptFreeRegister({
+            mail: config.mail,
+            proxy: config.proxy.trim(),
+            total: Math.max(1, Number(config.total) || 1),
+            threads: Math.max(1, Number(config.threads) || 1),
+            mode: config.mode,
+            target_quota: Math.max(1, Number(config.target_quota) || 1),
+            target_available: Math.max(1, Number(config.target_available) || 1),
+            check_interval: Math.max(1, Number(config.check_interval) || 5),
+          });
       onGptFreeRegisterChange(data.register);
       toast.success(gptFreeRegister.enabled ? "gptFree 任务已停止" : "gptFree 任务已启动");
     } catch (error) {

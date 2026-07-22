@@ -32,7 +32,11 @@ def _emit_log(text: str, color: str = "") -> None:
 
 def worker(index: int, stop_event: threading.Event | None = None, generation: int = 0) -> dict:
     started = time.time()
-    registrar = reference_register.ReferencePlatformRegistrar(config["proxy"], stop_event=stop_event)
+    registrar = reference_register.ReferencePlatformRegistrar(
+        config["proxy"],
+        stop_event=stop_event,
+        mail_config=config["mail"],
+    )
     with openai_register.thread_log_sink(_emit_log):
         try:
             openai_register.step(index, f"gptFree task started generation={generation}")

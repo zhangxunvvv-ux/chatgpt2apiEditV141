@@ -995,8 +995,11 @@ export async function fetchGptFreeRegisterConfig() {
   return httpRequest<{ register: RegisterConfig }>("/api/register/gptfree");
 }
 
-export async function startGptFreeRegister() {
-  return httpRequest<{ register: RegisterConfig }>("/api/register/gptfree/start", { method: "POST" });
+export async function startGptFreeRegister(config: Partial<RegisterConfig>) {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/gptfree/start", {
+    method: "POST",
+    body: config,
+  });
 }
 
 export async function stopGptFreeRegister() {

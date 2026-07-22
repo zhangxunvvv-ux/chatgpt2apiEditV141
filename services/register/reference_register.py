@@ -34,8 +34,13 @@ def _emit_log(text: str, color: str = "") -> None:
 class ReferencePlatformRegistrar(openai_register.PlatformRegistrar):
     """Alternative URL-driven registration flow adapted from the shared project."""
 
-    def __init__(self, proxy: str = "", stop_event: threading.Event | None = None) -> None:
-        super().__init__(proxy, stop_event=stop_event)
+    def __init__(
+        self,
+        proxy: str = "",
+        stop_event: threading.Event | None = None,
+        mail_config: dict | None = None,
+    ) -> None:
+        super().__init__(proxy, stop_event=stop_event, mail_config=mail_config)
         self._is_mobile = random.random() < 0.35
         major = random.randint(138, 146)
         build = random.randint(6000, 9999)
@@ -99,7 +104,7 @@ class ReferencePlatformRegistrar(openai_register.PlatformRegistrar):
 
     def _prepare_reference_code_baseline(self, index: int, mailbox: dict[str, Any], label: str) -> None:
         try:
-            mail_provider.prepare_code_baseline(openai_register._mail_config(self.proxy), mailbox)
+            mail_provider.prepare_code_baseline(self.mail_config, mailbox)
             openai_register.step(index, f"新注册：{label}邮箱基线已记录")
         except Exception as exc:
             openai_register.step(index, f"新注册：邮箱基线记录失败，继续注册: {str(exc)[:160]}", "yellow")
@@ -187,7 +192,10 @@ class ReferencePlatformRegistrar(openai_register.PlatformRegistrar):
     def register(self, index: int) -> dict[str, str]:
         self._ensure_active()
         openai_register.step(index, "新注册：开始创建邮箱")
-        mailbox = openai_register.create_mailbox(register_proxy=self.proxy)
+        mailbox = openai_register.create_mailbox(
+            register_proxy=self.proxy,
+            mail_config=self.mail_config,
+        )
         email = str(mailbox.get("address") or "").strip()
         if not email:
             mail_provider.release_mailbox(mailbox)
@@ -264,7 +272,11 @@ class ReferencePlatformRegistrar(openai_register.PlatformRegistrar):
 
 def worker(index: int, stop_event: threading.Event | None = None, generation: int = 0) -> dict:
     start = time.time()
-    registrar = ReferencePlatformRegistrar(config["proxy"], stop_event=stop_event)
+    registrar = ReferencePlatformRegistrar(
+        config["proxy"],
+        stop_event=stop_event,
+        mail_config=config["mail"],
+    )
     with openai_register.thread_log_sink(_emit_log):
         try:
             openai_register.step(index, f"新注册任务启动 generation={generation}")
