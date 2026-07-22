@@ -986,6 +986,22 @@ export async function resetNewRegister() {
   return httpRequest<{ register: RegisterConfig }>("/api/register/new/reset", { method: "POST" });
 }
 
+export async function fetchGptFreeRegisterConfig() {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/gptfree");
+}
+
+export async function startGptFreeRegister() {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/gptfree/start", { method: "POST" });
+}
+
+export async function stopGptFreeRegister() {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/gptfree/stop", { method: "POST" });
+}
+
+export async function resetGptFreeRegister() {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/gptfree/reset", { method: "POST" });
+}
+
 // ── CPA (CLIProxyAPI) ──────────────────────────────────────────────
 
 export type CPAPool = {

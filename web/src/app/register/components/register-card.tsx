@@ -1,6 +1,6 @@
 "use client";
 
-import { Activity, AlertTriangle, LoaderCircle, Plus, Play, RotateCcw, Save, Settings2, Square, Trash2, UserPlus, Zap } from "lucide-react";
+import { Activity, AlertTriangle, Bot, LoaderCircle, Plus, Play, RotateCcw, Save, Settings2, Square, Trash2, UserPlus, Zap } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -10,7 +10,15 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { resetNewRegister, startNewRegister, stopNewRegister, type RegisterConfig } from "@/lib/api";
+import {
+  resetGptFreeRegister,
+  resetNewRegister,
+  startGptFreeRegister,
+  startNewRegister,
+  stopGptFreeRegister,
+  stopNewRegister,
+  type RegisterConfig,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 import { useSettingsStore } from "../../settings/store";
@@ -18,12 +26,15 @@ import { useSettingsStore } from "../../settings/store";
 type RegisterCardProps = {
   newRegister: RegisterConfig | null;
   onNewRegisterChange: (config: RegisterConfig) => void;
+  gptFreeRegister: RegisterConfig | null;
+  onGptFreeRegisterChange: (config: RegisterConfig) => void;
 };
 
-export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardProps) {
-  const [mobileView, setMobileView] = useState<"config" | "results" | "new">("new");
-  const [desktopResultView, setDesktopResultView] = useState<"results" | "new">("new");
+export function RegisterCard({ newRegister, onNewRegisterChange, gptFreeRegister, onGptFreeRegisterChange }: RegisterCardProps) {
+  const [mobileView, setMobileView] = useState<"config" | "results" | "new" | "gptfree">("new");
+  const [desktopResultView, setDesktopResultView] = useState<"results" | "new" | "gptfree">("new");
   const [isSavingNew, setIsSavingNew] = useState(false);
+  const [isSavingGptFree, setIsSavingGptFree] = useState(false);
   const config = useSettingsStore((state) => state.registerConfig);
   const isLoading = useSettingsStore((state) => state.isLoadingRegister);
   const isSaving = useSettingsStore((state) => state.isSavingRegister);
@@ -59,6 +70,8 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
   const logs = config.logs || [];
   const newStats = newRegister?.stats || { success: 0, fail: 0, done: 0, running: 0, threads: config.threads };
   const newLogs = newRegister?.logs || [];
+  const gptFreeStats = gptFreeRegister?.stats || { success: 0, fail: 0, done: 0, running: 0, threads: config.threads };
+  const gptFreeLogs = gptFreeRegister?.logs || [];
   const toggleNewRegister = async () => {
     if (!newRegister) return;
     setIsSavingNew(true);
@@ -82,6 +95,31 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
       toast.error(error instanceof Error ? error.message : "重置新注册统计失败");
     } finally {
       setIsSavingNew(false);
+    }
+  };
+  const toggleGptFreeRegister = async () => {
+    if (!gptFreeRegister) return;
+    setIsSavingGptFree(true);
+    try {
+      const data = gptFreeRegister.enabled ? await stopGptFreeRegister() : await startGptFreeRegister();
+      onGptFreeRegisterChange(data.register);
+      toast.success(gptFreeRegister.enabled ? "gptFree 任务已停止" : "gptFree 任务已启动");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "切换 gptFree 状态失败");
+    } finally {
+      setIsSavingGptFree(false);
+    }
+  };
+  const resetGptFreeRegisterStats = async () => {
+    setIsSavingGptFree(true);
+    try {
+      const data = await resetGptFreeRegister();
+      onGptFreeRegisterChange(data.register);
+      toast.success("gptFree 统计已重置");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "重置 gptFree 统计失败");
+    } finally {
+      setIsSavingGptFree(false);
     }
   };
   const updateProviderType = (index: number, type: string) => {
@@ -568,6 +606,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
                 <div className="hidden items-center rounded-lg border border-stone-200 bg-white p-1 xl:flex">
                   <button type="button" onClick={() => setDesktopResultView("results")} className="rounded-md bg-stone-950 px-2.5 py-1.5 text-xs font-semibold text-white">运行结果</button>
                   <button type="button" onClick={() => setDesktopResultView("new")} className="rounded-md px-2.5 py-1.5 text-xs font-semibold text-stone-500 hover:bg-stone-100">新注册</button>
+                  <button type="button" onClick={() => setDesktopResultView("gptfree")} className="rounded-md px-2.5 py-1.5 text-xs font-semibold text-stone-500 hover:bg-stone-100">gptFree</button>
                 </div>
                 <Badge variant={config.enabled ? "success" : "secondary"} className="rounded-md">
                   {config.enabled ? "运行中" : "已停止"}
@@ -663,6 +702,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
               <div className="hidden items-center rounded-lg border border-stone-200 bg-white p-1 xl:flex">
                 <button type="button" onClick={() => setDesktopResultView("results")} className="rounded-md px-2.5 py-1.5 text-xs font-semibold text-stone-500 hover:bg-stone-100">运行结果</button>
                 <button type="button" onClick={() => setDesktopResultView("new")} className="rounded-md bg-stone-950 px-2.5 py-1.5 text-xs font-semibold text-white">新注册</button>
+                <button type="button" onClick={() => setDesktopResultView("gptfree")} className="rounded-md px-2.5 py-1.5 text-xs font-semibold text-stone-500 hover:bg-stone-100">gptFree</button>
               </div>
               <Badge variant={newRegister?.enabled ? "success" : "secondary"} className="rounded-md">
                 {newRegister?.enabled ? "运行中" : "已停止"}
@@ -726,11 +766,101 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
           </div>
         </div>
       </section>
+
+      <section
+        id="register-gptfree-panel"
+        role="tabpanel"
+        aria-label="gptFree"
+        className={cn(
+          "min-h-0 flex-col overflow-y-auto p-4 pb-24 overscroll-contain xl:overflow-hidden xl:pb-4",
+          mobileView === "gptfree" ? "flex" : "hidden",
+          desktopResultView === "gptfree" ? "xl:flex" : "xl:hidden",
+        )}
+      >
+        <div className="space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex size-9 items-center justify-center rounded-md bg-cyan-100">
+                <Bot className="size-5 text-cyan-800" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold tracking-tight">gptFree</h2>
+                <p className="mt-1 text-sm text-stone-500">独立 Agent Identity 注册，共用左侧邮箱、代理和任务参数。</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="hidden items-center rounded-lg border border-stone-200 bg-white p-1 xl:flex">
+                <button type="button" onClick={() => setDesktopResultView("results")} className="rounded-md px-2.5 py-1.5 text-xs font-semibold text-stone-500 hover:bg-stone-100">运行结果</button>
+                <button type="button" onClick={() => setDesktopResultView("new")} className="rounded-md px-2.5 py-1.5 text-xs font-semibold text-stone-500 hover:bg-stone-100">新注册</button>
+                <button type="button" onClick={() => setDesktopResultView("gptfree")} className="rounded-md bg-stone-950 px-2.5 py-1.5 text-xs font-semibold text-white">gptFree</button>
+              </div>
+              <Badge variant={gptFreeRegister?.enabled ? "success" : "secondary"} className="rounded-md">
+                {gptFreeRegister?.enabled ? "运行中" : "已停止"}
+              </Badge>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs leading-5 text-cyan-950">
+            获取有效 Web Session 后校验 JWT，本地生成 Ed25519 密钥，注册 Runtime 并加密保存私钥。日志只记录状态与长度，不输出 Access Token、Assertion 或私钥。
+          </div>
+
+          <div className="flex snap-x gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:grid sm:grid-cols-4 sm:overflow-visible sm:pb-0" aria-label="gptFree 运行指标，手机端可横向滑动">
+            {[
+              ["成功 / 成功率", `${gptFreeStats.success} / ${gptFreeStats.success_rate || 0}%`],
+              ["失败", gptFreeStats.fail],
+              ["完成", gptFreeStats.done],
+              ["运行 / 线程", `${gptFreeStats.running} / ${gptFreeStats.threads}`],
+              ["运行时间", `${gptFreeStats.elapsed_seconds || 0}s`],
+              ["平均注册单个", `${gptFreeStats.avg_seconds || 0}s`],
+              ["连续失败", gptFreeStats.consecutive_failures || 0],
+              ["调度自恢复", gptFreeStats.scheduler_restarts || 0],
+            ].map(([label, value]) => (
+              <div key={label} className="min-w-[8.5rem] shrink-0 snap-start rounded-xl border border-stone-200 bg-white/70 px-3 py-2 sm:min-w-0">
+                <div className="text-xs text-stone-400">{label}</div>
+                <div className="mt-1 text-base font-semibold text-stone-800">{value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <Button className="h-10 rounded-xl bg-cyan-700 px-3 font-semibold text-white hover:bg-cyan-600" onClick={() => void toggleGptFreeRegister()} disabled={isSavingGptFree || !gptFreeRegister}>
+              {isSavingGptFree ? <LoaderCircle className="size-4 animate-spin" /> : gptFreeRegister?.enabled ? <Square className="size-4" /> : <Play className="size-4" />}
+              {gptFreeRegister?.enabled ? "停止 gptFree" : "启动 gptFree"}
+            </Button>
+            <Button variant="outline" className="h-10 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={() => void resetGptFreeRegisterStats()} disabled={isSavingGptFree || Boolean(gptFreeRegister?.enabled)}>
+              <RotateCcw className="size-4" />
+              重置统计
+            </Button>
+          </div>
+        </div>
+
+        <div className="mt-4 flex min-h-56 flex-1 shrink-0 flex-col space-y-3 border-t border-stone-200 pt-4 xl:min-h-0 xl:shrink">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-stone-900">gptFree 实时日志</h3>
+              <p className="mt-1 text-xs text-stone-500">与原注册、新注册独立运行和统计。</p>
+            </div>
+            <Badge variant="secondary" className="rounded-md">{gptFreeLogs.length}</Badge>
+          </div>
+          <div data-testid="gptfree-register-log-list" className="min-h-0 flex-1 touch-pan-y overflow-x-hidden overflow-y-auto overscroll-contain rounded-xl border border-stone-200 bg-white/70 p-3 font-mono text-xs leading-5">
+            {gptFreeLogs.length === 0 ? (
+              <div className="text-stone-500">暂无 gptFree 日志</div>
+            ) : (
+              gptFreeLogs.slice().reverse().map((item, index) => (
+                <div key={`${item.time}-${index}`} className={cn("grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 border-b border-stone-100 py-1.5 last:border-0", item.level === "red" ? "text-rose-600" : item.level === "green" ? "text-emerald-700" : item.level === "yellow" ? "text-amber-700" : "text-stone-700")}>
+                  <span className="tabular-nums text-stone-400">{new Date(item.time).toLocaleTimeString()}</span>
+                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">{item.text}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </section>
     </div>
     <div
       role="tablist"
       aria-label="注册页面视图"
-      className="fixed bottom-[calc(env(safe-area-inset-bottom)+1rem)] left-[max(1rem,env(safe-area-inset-left))] z-50 flex items-center gap-1 rounded-2xl border border-stone-200/90 bg-white/95 p-1.5 shadow-[0_18px_55px_-18px_rgba(28,25,23,0.45)] backdrop-blur-xl xl:hidden dark:border-white/10 dark:bg-stone-900/95"
+      className="fixed bottom-[calc(env(safe-area-inset-bottom)+1rem)] left-[max(1rem,env(safe-area-inset-left))] right-[max(1rem,env(safe-area-inset-right))] z-50 flex items-center gap-1 overflow-x-auto rounded-2xl border border-stone-200/90 bg-white/95 p-1.5 shadow-[0_18px_55px_-18px_rgba(28,25,23,0.45)] backdrop-blur-xl [scrollbar-width:none] xl:hidden [&::-webkit-scrollbar]:hidden dark:border-white/10 dark:bg-stone-900/95"
     >
       <button
         type="button"
@@ -739,7 +869,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
         aria-controls="register-config-panel"
         onClick={() => setMobileView("config")}
         className={cn(
-          "inline-flex h-10 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition",
+          "inline-flex h-10 shrink-0 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition",
           mobileView === "config"
             ? "bg-stone-950 text-white shadow-sm dark:bg-white dark:text-stone-950"
             : "text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-white",
@@ -755,7 +885,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
         aria-controls="register-results-panel"
         onClick={() => setMobileView("results")}
         className={cn(
-          "inline-flex h-10 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition",
+          "inline-flex h-10 shrink-0 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition",
           mobileView === "results"
             ? "bg-stone-950 text-white shadow-sm dark:bg-white dark:text-stone-950"
             : "text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-white",
@@ -777,7 +907,7 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
         aria-controls="register-new-panel"
         onClick={() => setMobileView("new")}
         className={cn(
-          "inline-flex h-10 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition",
+          "inline-flex h-10 shrink-0 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition",
           mobileView === "new"
             ? "bg-amber-500 text-stone-950 shadow-sm"
             : "text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-white",
@@ -790,6 +920,28 @@ export function RegisterCard({ newRegister, onNewRegisterChange }: RegisterCardP
         新注册
         {(newStats.fail || 0) > 0 ? (
           <span className={cn("rounded-full px-1.5 py-0.5 text-[10px] leading-none", mobileView === "new" ? "bg-stone-950/10 text-stone-950" : "bg-rose-50 text-rose-600")}>{newStats.fail}</span>
+        ) : null}
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mobileView === "gptfree"}
+        aria-controls="register-gptfree-panel"
+        onClick={() => setMobileView("gptfree")}
+        className={cn(
+          "inline-flex h-10 shrink-0 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition",
+          mobileView === "gptfree"
+            ? "bg-cyan-700 text-white shadow-sm"
+            : "text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-white",
+        )}
+      >
+        <span className="relative">
+          <Bot className="size-4" />
+          {gptFreeRegister?.enabled ? <span className="absolute -right-1 -top-1 size-2 rounded-full border border-white bg-emerald-500" /> : null}
+        </span>
+        gptFree
+        {(gptFreeStats.fail || 0) > 0 ? (
+          <span className={cn("rounded-full px-1.5 py-0.5 text-[10px] leading-none", mobileView === "gptfree" ? "bg-white/15 text-white" : "bg-rose-50 text-rose-600")}>{gptFreeStats.fail}</span>
         ) : null}
       </button>
     </div>

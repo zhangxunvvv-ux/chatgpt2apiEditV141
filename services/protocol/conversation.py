@@ -22,7 +22,9 @@ from services.openai_backend_api import (
 from utils.helper import (
     IMAGE_MODELS,
     extract_image_from_message_content,
+    image_upstream_model,
     is_codex_image_model,
+    is_gptfree_model,
     is_supported_image_model,
     split_image_model,
 )
@@ -317,6 +319,7 @@ class ConversationRequest:
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
     cancel_event: Any = None  # threading.Event-like object used by background image tasks
+    source_type: str | None = None
 
 
 @dataclass
@@ -1276,9 +1279,12 @@ def _generate_single_image(
                 request.progress_callback("getting_account")
             plan_type, _ = split_image_model(request.model)
             codex_model = is_codex_image_model(request.model)
+            source_type = request.source_type or (
+                "gptfree" if is_gptfree_model(request.model) else ("codex" if codex_model else None)
+            )
             token = account_service.get_available_access_token(
                 plan_type=plan_type,
-                source_type="codex" if codex_model else None,
+                source_type=source_type,
                 plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
                 excluded_tokens=attempted_tokens,
             )
@@ -1324,7 +1330,11 @@ def _generate_single_image(
             if request.progress_callback:
                 request.progress_callback(event)
 
-        attempt_request = replace(request, progress_callback=progress_callback)
+        attempt_request = replace(
+            request,
+            model=image_upstream_model(request.model),
+            progress_callback=progress_callback,
+        )
 
         def mark_result(success: bool, error: object = "") -> None:
             nonlocal slot_held
@@ -1337,6 +1347,7 @@ def _generate_single_image(
             stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
             outputs: list[ImageOutput] = []
             for output in stream_fn(backend, attempt_request, index, total):
+                output.model = request.model
                 if account_email and not output.account_email:
                     output.account_email = account_email
                 if output.kind == "message" and request.message_as_error:

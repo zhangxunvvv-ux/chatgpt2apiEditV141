@@ -6,6 +6,7 @@ from typing import Any, Iterable, Iterator
 
 from fastapi import HTTPException
 
+from services.gptfree_response_service import gptfree_response_service, is_gptfree_request_model
 from services.protocol.chat_completion_cache import cache_key, chat_completion_cache, normalize_text_messages
 from services.protocol.conversation import (
     ConversationRequest,
@@ -151,6 +152,68 @@ def collect_chat_content(chunks: Iterable[dict[str, Any]]) -> str:
     return "".join(parts)
 
 
+def _gptfree_response_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "user").strip() or "user"
+        content = message.get("content", "")
+        if isinstance(content, str):
+            items.append({"role": role, "content": content})
+            continue
+        if not isinstance(content, list):
+            items.append({"role": role, "content": str(content or "")})
+            continue
+        parts: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type") or "").strip()
+            if part_type in {"text", "input_text", "output_text"}:
+                parts.append({"type": "input_text", "text": str(part.get("text") or "")})
+            elif part_type in {"image_url", "input_image"}:
+                image_url = part.get("image_url")
+                if isinstance(image_url, dict):
+                    image_url = image_url.get("url")
+                image_url = image_url or part.get("url")
+                if image_url:
+                    parts.append({"type": "input_image", "image_url": str(image_url)})
+        items.append({"role": role, "content": parts or ""})
+    return items
+
+
+def stream_gptfree_chat_completion(body: dict[str, Any], messages: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    model = str(body.get("model") or "gptfree")
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    sent_role = False
+    response_body = {
+        "model": model,
+        "input": _gptfree_response_input(messages),
+        "stream": True,
+    }
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict):
+        response_body["reasoning"] = reasoning
+    else:
+        effort = thinking_effort_from_body(body)
+        if effort:
+            response_body["reasoning"] = {"effort": "xhigh" if effort == "extended" else effort}
+    for event in gptfree_response_service.stream(response_body):
+        if event.get("type") != "response.output_text.delta":
+            continue
+        delta = str(event.get("delta") or "")
+        if not delta:
+            continue
+        if not sent_role:
+            sent_role = True
+            yield completion_chunk(model, {"role": "assistant", "content": delta}, None, completion_id, created)
+        else:
+            yield completion_chunk(model, {"content": delta}, None, completion_id, created)
+    if not sent_role:
+        yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
+    yield completion_chunk(model, {}, "stop", completion_id, created)
+
+
 def chat_messages_from_body(body: dict[str, Any]) -> list[dict[str, Any]]:
     messages = body.get("messages")
     if isinstance(messages, list) and messages:
@@ -291,6 +354,8 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         if is_image_chat_request(body):
             return image_chat_events(body)
         model, messages = text_chat_parts(body)
+        if is_gptfree_request_model(model):
+            return stream_gptfree_chat_completion(body, messages)
         if is_web_search_chat_request(body) and not has_unsupported_tools(body, WEB_SEARCH_TOOL_TYPES):
             return stream_web_search_chat_completion(messages, model)
         thinking_effort = thinking_effort_from_body(body)
@@ -302,6 +367,9 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     if is_image_chat_request(body):
         return image_chat_response(body)
     model, messages = text_chat_parts(body)
+    if is_gptfree_request_model(model):
+        content = collect_chat_content(stream_gptfree_chat_completion(body, messages))
+        return completion_response(model, content, messages=messages)
     if is_web_search_chat_request(body) and not has_unsupported_tools(body, WEB_SEARCH_TOOL_TYPES):
         return web_search_chat_response(messages, model)
     thinking_effort = thinking_effort_from_body(body)

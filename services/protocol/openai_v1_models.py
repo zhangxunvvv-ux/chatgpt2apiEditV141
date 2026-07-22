@@ -13,6 +13,12 @@ from utils.helper import CODEX_IMAGE_MODEL
 MODEL_CACHE_TTL_SECONDS = 5 * 60
 MAX_AUTH_MODEL_ATTEMPTS = 3
 LATEST_CHAT_MODELS = ("gpt-5-6-sol", "gpt-5-6-Luna")
+GPTFREE_MODELS = (
+    "gptfree",
+    "gptfree/gpt-5.6-sol",
+    "gptfree/gpt-5.6-luna",
+    "gptfree/gpt-5.6-terra",
+)
 
 _model_cache: dict[str, Any] | None = None
 _model_cache_expires_at = 0.0
@@ -90,12 +96,13 @@ def list_models() -> dict[str, Any]:
         for item in data
         if isinstance(item, dict) and str(item.get("id") or "").strip()
     }
-    latest = [existing.get(model) or _model_entry(model) for model in LATEST_CHAT_MODELS]
+    preferred_models = (*LATEST_CHAT_MODELS, *GPTFREE_MODELS)
+    latest = [existing.get(model) or _model_entry(model) for model in preferred_models]
     remaining = [
         item
         for item in data
         if not isinstance(item, dict)
-           or str(item.get("id") or "").strip() not in LATEST_CHAT_MODELS
+           or str(item.get("id") or "").strip() not in preferred_models
     ]
     auto_index = next(
         (

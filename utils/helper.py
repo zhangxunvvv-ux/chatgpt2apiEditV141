@@ -15,14 +15,15 @@ from services.proxy_service import proxy_settings
 from utils.log import logger
 
 BASE_IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
+GPTFREE_MODEL = "gptfree"
 IMAGE_MODEL_PLAN_TYPES = ("plus", "team", "pro")
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 PREFIXED_CODEX_IMAGE_MODELS = {
     f"{plan_type}-{CODEX_IMAGE_MODEL}"
     for plan_type in IMAGE_MODEL_PLAN_TYPES
 }
-IMAGE_MODELS = BASE_IMAGE_MODELS | PREFIXED_CODEX_IMAGE_MODELS
-PUBLIC_IMAGE_MODELS = BASE_IMAGE_MODELS | PREFIXED_CODEX_IMAGE_MODELS
+IMAGE_MODELS = BASE_IMAGE_MODELS | PREFIXED_CODEX_IMAGE_MODELS | {GPTFREE_MODEL}
+PUBLIC_IMAGE_MODELS = BASE_IMAGE_MODELS | PREFIXED_CODEX_IMAGE_MODELS | {GPTFREE_MODEL}
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 SUPPORTED_JSON_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
@@ -112,6 +113,8 @@ def split_image_model(model: object) -> tuple[str | None, str | None]:
         return None, None
     if normalized in BASE_IMAGE_MODELS:
         return None, normalized
+    if normalized == GPTFREE_MODEL:
+        return None, "gpt-image-2"
     for plan_type in IMAGE_MODEL_PLAN_TYPES:
         prefix = f"{plan_type}-"
         if normalized.startswith(prefix):
@@ -131,9 +134,34 @@ def is_codex_image_model(model: object) -> bool:
     return base_model == CODEX_IMAGE_MODEL
 
 
+def is_gptfree_model(model: object) -> bool:
+    normalized = str(model or "").strip().lower()
+    return normalized == GPTFREE_MODEL or normalized.startswith(f"{GPTFREE_MODEL}/")
+
+
+def gptfree_upstream_model(model: object, default: str = "gpt-5.6-sol") -> str:
+    normalized = str(model or "").strip()
+    if normalized.lower() == GPTFREE_MODEL:
+        return default
+    if normalized.lower().startswith(f"{GPTFREE_MODEL}/"):
+        value = normalized.split("/", 1)[1].strip()
+        return value or default
+    return normalized or default
+
+
+def image_upstream_model(model: object) -> str:
+    if str(model or "").strip().lower() == GPTFREE_MODEL:
+        return "gpt-image-2"
+    return str(model or "gpt-image-2")
+
+
 def is_image_chat_request(body: dict[str, object]) -> bool:
     model = str(body.get("model") or "").strip()
     modalities = body.get("modalities")
+    if model.lower() == GPTFREE_MODEL:
+        return isinstance(modalities, list) and "image" in {str(item or "").strip().lower() for item in modalities}
+    if is_gptfree_model(model):
+        return False
     if is_supported_image_model(model):
         return True
     return isinstance(modalities, list) and "image" in {str(item or "").strip().lower() for item in modalities}

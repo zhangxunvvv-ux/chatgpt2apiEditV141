@@ -7,6 +7,7 @@ from typing import Any, Iterable, Iterator
 from fastapi import HTTPException
 
 from services.protocol.chat_completion_cache import cache_key, chat_completion_cache, normalize_text_messages
+from services.gptfree_response_service import gptfree_response_service, is_gptfree_request_model
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
@@ -412,6 +413,9 @@ def collect_response(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
 def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     if is_text_response_request(body):
+        if is_gptfree_request_model(body.get("model")):
+            yield from gptfree_response_service.stream(body)
+            return
         model, messages = text_response_parts(body)
         if has_web_search_tool(body) and not has_unsupported_response_tools(body):
             yield from stream_web_search_response(body, messages)

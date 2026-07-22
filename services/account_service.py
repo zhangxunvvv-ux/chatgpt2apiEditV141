@@ -673,8 +673,14 @@ class AccountService:
                 new_token = self._apply_refreshed_tokens(access_token, token_data, f"{event}:password_relogin")
 
                 # 额外更新 source_type 和 status（静默，避免重复日志）
+                retained_source_type = (
+                    "gptfree"
+                    if self._normalize_source_type(account.get("source_type")) == "gptfree"
+                       and account.get("gptfree_identity_id")
+                    else result.get("source_type", "password")
+                )
                 self.update_account(new_token, {
-                    "source_type": result.get("source_type", "password"),
+                    "source_type": retained_source_type,
                     "status": "正常",
                 }, quiet=True)
 
@@ -1254,13 +1260,20 @@ class AccountService:
             if plan_type or source_type else f"no available image quota (tried {len(attempted_tokens)} tokens)"
         )
 
-    def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
+    def get_text_access_token(
+            self,
+            excluded_tokens: set[str] | None = None,
+            source_type: str | None = None,
+            *,
+            refresh: bool = True,
+    ) -> str:
         excluded = set(excluded_tokens or set())
         with self._lock:
             candidates = [
                 token
                 for account in self._accounts.values()
                 if account.get("status") not in {"禁用", "异常"}
+                   and self._account_matches_source_type(account, source_type)
                    and (token := account.get("access_token") or "")
                    and token not in excluded
             ]
@@ -1268,6 +1281,8 @@ class AccountService:
                 return ""
             access_token = candidates[self._index % len(candidates)]
             self._index += 1
+        if not refresh:
+            return access_token
         return self.refresh_access_token(access_token, event="get_text_access_token") or access_token
 
     def mark_text_used(self, access_token: str) -> None:
@@ -1364,7 +1379,18 @@ class AccountService:
             now_ts = time.time()
             for token, item in self._accounts.items():
                 account = dict(item)
-                for secret_key in ("access_token", "refresh_token", "id_token", "session_token", "cookie", "password"):
+                for secret_key in (
+                    "access_token",
+                    "refresh_token",
+                    "id_token",
+                    "session_token",
+                    "cookie",
+                    "password",
+                    "agent_private_key",
+                    "agent_private_key_encrypted",
+                    "agent_assertion",
+                    "task_id",
+                ):
                     account.pop(secret_key, None)
                 account.pop("proxy", None)
                 account.pop("fp", None)

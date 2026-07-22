@@ -11,12 +11,13 @@ from pathlib import Path
 
 from services.account_service import account_service
 from services.config import DATA_DIR
-from services.register import mail_provider, openai_register, reference_register
+from services.register import gptfree_register, mail_provider, openai_register, reference_register
 from utils.resource_limits import fd_pressure, is_resource_exhaustion_error, process_fd_snapshot
 
 
 REGISTER_FILE = DATA_DIR / "register.json"
 NEW_REGISTER_FILE = DATA_DIR / "new_register.json"
+GPTFREE_REGISTER_FILE = DATA_DIR / "gptfree_register.json"
 
 def _serialize_outlook_pool(credentials: list[dict]) -> str:
     return "\n".join(
@@ -662,3 +663,4 @@ class RegisterService:
 
 register_service = RegisterService(REGISTER_FILE)
 new_register_service = RegisterService(NEW_REGISTER_FILE, engine=reference_register)
+gptfree_register_service = RegisterService(GPTFREE_REGISTER_FILE, engine=gptfree_register)

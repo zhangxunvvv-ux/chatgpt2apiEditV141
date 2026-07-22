@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.support import require_admin
-from services.register_service import new_register_service, register_service
+from services.register_service import gptfree_register_service, new_register_service, register_service
 
 
 class RegisterConfigRequest(BaseModel):
@@ -31,6 +31,22 @@ def create_router() -> APIRouter:
 
     def new_register_snapshot() -> dict:
         snapshot = new_register_service.get()
+        shared = register_service.get()
+        for key in (
+            "mail",
+            "proxy",
+            "total",
+            "threads",
+            "mode",
+            "target_quota",
+            "target_available",
+            "check_interval",
+        ):
+            snapshot[key] = shared[key]
+        return snapshot
+
+    def gptfree_register_snapshot() -> dict:
+        snapshot = gptfree_register_service.get()
         shared = register_service.get()
         for key in (
             "mail",
@@ -122,6 +138,44 @@ def create_router() -> APIRouter:
             last = ""
             while True:
                 payload = json.dumps(new_register_snapshot(), ensure_ascii=False)
+                if payload != last:
+                    last = payload
+                    yield f"data: {payload}\n\n"
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @router.get("/api/register/gptfree")
+    async def get_gptfree_register(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"register": gptfree_register_snapshot()}
+
+    @router.post("/api/register/gptfree/start")
+    async def start_gptfree_register(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        gptfree_register_service.start(register_service.shared_config_snapshot())
+        return {"register": gptfree_register_snapshot()}
+
+    @router.post("/api/register/gptfree/stop")
+    async def stop_gptfree_register(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        gptfree_register_service.stop()
+        return {"register": gptfree_register_snapshot()}
+
+    @router.post("/api/register/gptfree/reset")
+    async def reset_gptfree_register(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        gptfree_register_service.reset()
+        return {"register": gptfree_register_snapshot()}
+
+    @router.get("/api/register/gptfree/events")
+    async def gptfree_register_events(token: str = ""):
+        require_admin(f"Bearer {token}")
+
+        async def stream():
+            last = ""
+            while True:
+                payload = json.dumps(gptfree_register_snapshot(), ensure_ascii=False)
                 if payload != last:
                     last = payload
                     yield f"data: {payload}\n\n"

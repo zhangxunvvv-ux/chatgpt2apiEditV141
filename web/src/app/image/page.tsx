@@ -232,7 +232,7 @@ function addReferenceMarkupInstructions(
 function filterImageModels(items: Model[]): ImageModel[] {
   return items
     .map((item) => String(item.id || "").trim())
-    .filter((id, index, list) => id.toLowerCase().includes("image") && list.indexOf(id) === index);
+    .filter((id, index, list) => (id.toLowerCase().includes("image") || id.toLowerCase() === "gptfree") && list.indexOf(id) === index);
 }
 
 function normalizeStoredImageModel(value: string | null, availableModels: ImageModel[]): ImageModel {
